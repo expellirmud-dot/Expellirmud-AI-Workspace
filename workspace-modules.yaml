@@ -1,0 +1,17 @@
+schema_version: "1.0"
+workspace:
+  id: expellirmud-ai-workspace
+  name: Expellirmud AI-Workspace
+  root: "D:\\ai-tools\\AI-Workspace"
+  mode: manual-safe
+modules:
+  - id: ai-ops-registry
+    kind: registry
+    path: "D:\\ai-tools\\AI-Workspace\\ai-ops-registry"
+    entrypoint: README.md
+    status: active
+external_projects:
+  - id: lumina-studio
+    path: "D:\\lumina-studio"
+    registry_profile: "ai-ops-registry\\projects\\lumina-studio\\project.yaml"
+

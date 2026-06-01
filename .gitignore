@@ -1,0 +1,6 @@
+# Workspace-local transient files
+.codex/
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
