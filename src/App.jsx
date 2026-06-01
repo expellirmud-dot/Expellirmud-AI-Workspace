@@ -127,6 +127,8 @@ export default function App() {
   const [finalGateDecision, setFinalGateDecision] = useState("APPROVED");
   const [finalGateContent, setFinalGateContent] = useState("");
 
+  const [connectorReadiness, setConnectorReadiness] = useState(null);
+
   useEffect(() => { loadData(); }, []);
 
   async function loadData() {
@@ -141,6 +143,12 @@ export default function App() {
         if (!selController) setSelController(workspaceData.channels.find(c => c.role === 'controller')?.channel_id || "");
         if (!selWorker) setSelWorker(workspaceData.channels.find(c => c.role === 'worker')?.channel_id || "");
         if (!selVerifier) setSelVerifier(workspaceData.channels.find(c => c.role === 'verifier')?.channel_id || "");
+      }
+      try {
+        const readinessData = await apiCall("/api/connector-readiness");
+        setConnectorReadiness(readinessData);
+      } catch (e) {
+        console.error("Failed to load connector readiness", e);
       }
       setStatus("Workspace loaded");
     } catch (err) {
@@ -854,6 +862,22 @@ export default function App() {
                   </Card>
                 </div>
               </div>
+
+              {connectorReadiness && (
+                <Card title="ChatGPT Connector Readiness">
+                  <div className="stack-small">
+                    <div><b>Current dispatch method:</b> {connectorReadiness.dispatch_method === "manual_copy" ? "Manual Copy" : connectorReadiness.dispatch_method}</div>
+                    <div><b>Proposed method:</b> MCP/API</div>
+                    <div><b>Readiness:</b> <strong>{connectorReadiness.status === "CONNECTOR_POLICY_PENDING" ? "Policy Pending" : connectorReadiness.status}</strong></div>
+                    <div><b>Auto-send:</b> Disabled</div>
+                    <div><b>Browser automation:</b> Forbidden</div>
+                    <div><b>Reason:</b> {connectorReadiness.reason}</div>
+                    <div className="mt-4">
+                      <button className="btn-secondary" disabled>Send via MCP/API — Requires Phase 2B Approval</button>
+                    </div>
+                  </div>
+                </Card>
+              )}
 
               {taskFiles.orchestratorReport && (
                 <Card title="Orchestrator Report v1">

@@ -692,6 +692,18 @@ export default defineConfig({
           return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
         };
 
+        server.middlewares.use("/api/connector-readiness", (req, res) => {
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({
+            channel: "chatgpt_web_project",
+            dispatch_method: "manual_copy",
+            approved_connector_allowed: false,
+            status: "CONNECTOR_POLICY_PENDING",
+            can_send: false,
+            reason: "Phase 2B approval required before MCP/API dispatch."
+          }));
+        });
+
         server.middlewares.use("/api/workspace-data", (_req, res) => {
           const dashboardState = readYaml(dashboardStatePath) || {};
           const channels = readYaml(channelsPath) || [];
