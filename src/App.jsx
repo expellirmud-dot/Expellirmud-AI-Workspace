@@ -129,6 +129,13 @@ export default function App() {
 
   useEffect(() => {
     if (selectedTaskId) {
+      const taskEntry = data?.tasks?.find(t => t.name === `${selectedTaskId}.yaml`);
+      if (taskEntry?.data?.task?.assigned_channels) {
+        const assigned = taskEntry.data.task.assigned_channels;
+        if (assigned.controller) setSelController(assigned.controller);
+        if (assigned.worker) setSelWorker(assigned.worker);
+        if (assigned.verifier) setSelVerifier(assigned.verifier);
+      }
       loadTaskFiles();
       setPendingConfirmRole(null);
     }
@@ -147,19 +154,6 @@ export default function App() {
   }
 
   async function handleCreateTask() {
-    const warns = [];
-    [selController, selWorker, selVerifier].forEach(ch => {
-       const channel = data.channels.find(c => c.channel_id === ch);
-       if (channel && ['unavailable', 'needs_config'].includes(channel.readiness_status)) {
-         warns.push(`${channel.label} is ${channel.readiness_status}`);
-       }
-    });
-    
-    if (warns.length > 0) {
-       const proceed = window.confirm(`Warnings:\n${warns.join('\n')}\n\nDo you want to proceed?`);
-       if (!proceed) return;
-    }
-
     setStatus("Creating task...");
     try {
       const channels = { controller: selController, worker: selWorker, verifier: selVerifier };
@@ -174,9 +168,28 @@ export default function App() {
   }
 
   async function handleGenerateDispatch() {
+    const warns = [];
+    [selController, selWorker, selVerifier].forEach(ch => {
+       const channel = data.channels.find(c => c.channel_id === ch);
+       if (channel && ['unavailable', 'needs_config'].includes(channel.readiness_status)) {
+         warns.push(`${channel.label} is ${channel.readiness_status}`);
+       }
+    });
+    
+    if (warns.length > 0) {
+       const proceed = window.confirm(`Warnings:\n${warns.join('\n')}\n\nDo you want to proceed?`);
+       if (!proceed) return;
+    }
+
     setStatus("Generating dispatch packages...");
     try {
-      await apiCall("/api/generate-dispatch", "POST", { projectSlug: newProjectSlug, objective: activeTask.task.objective, taskId: selectedTaskId });
+      const channels = { controller: selController, worker: selWorker, verifier: selVerifier };
+      await apiCall("/api/generate-dispatch", "POST", { 
+        projectSlug: newProjectSlug, 
+        objective: activeTask.task.objective, 
+        taskId: selectedTaskId,
+        channels
+      });
       setStatus("Dispatch generated");
       await loadData();
       await loadTaskFiles();
@@ -429,19 +442,6 @@ export default function App() {
             <label>Objective</label>
             <textarea value={newObjective} onChange={e => setNewObjective(e.target.value)} rows={3} />
             
-            <label className="mt-2">Controller Channel</label>
-            <select value={selController} onChange={e => setSelController(e.target.value)}>
-               {data.channels.filter(c => c.role === 'controller').map(c => <option key={c.channel_id} value={c.channel_id}>{c.label} ({c.readiness_status})</option>)}
-            </select>
-            <label className="mt-2">Worker Channel</label>
-            <select value={selWorker} onChange={e => setSelWorker(e.target.value)}>
-               {data.channels.filter(c => c.role === 'worker').map(c => <option key={c.channel_id} value={c.channel_id}>{c.label} ({c.readiness_status})</option>)}
-            </select>
-            <label className="mt-2">Verifier Channel</label>
-            <select value={selVerifier} onChange={e => setSelVerifier(e.target.value)}>
-               {data.channels.filter(c => c.role === 'verifier').map(c => <option key={c.channel_id} value={c.channel_id}>{c.label} ({c.readiness_status})</option>)}
-            </select>
-            
             <label className="mt-2">Task ID (Optional)</label>
             <input value={newTaskId} onChange={e => setNewTaskId(e.target.value)} placeholder="Auto-generated if empty" />
             
@@ -503,6 +503,29 @@ export default function App() {
 
               <div className="grid">
                 <Card title="Dispatch Execution Control">
+                  <div className="mb-4 p-4" style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '4px' }}>
+                    <div className="grid grid-cols-3 gap-4">
+                      <div>
+                        <label>Controller</label>
+                        <select value={selController} onChange={e => setSelController(e.target.value)} disabled={isDone}>
+                           {data.channels.filter(c => c.role === 'controller').map(c => <option key={c.channel_id} value={c.channel_id}>{c.label}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label>Worker</label>
+                        <select value={selWorker} onChange={e => setSelWorker(e.target.value)} disabled={isDone}>
+                           {data.channels.filter(c => c.role === 'worker').map(c => <option key={c.channel_id} value={c.channel_id}>{c.label}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label>Verifier</label>
+                        <select value={selVerifier} onChange={e => setSelVerifier(e.target.value)} disabled={isDone}>
+                           {data.channels.filter(c => c.role === 'verifier').map(c => <option key={c.channel_id} value={c.channel_id}>{c.label}</option>)}
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
                   <div className="buttonRow mb-4">
                     <button onClick={handleGenerateDispatch} disabled={isDone}>Generate / Refresh Dispatch</button>
                   </div>
