@@ -6,3 +6,5 @@ Thumbs.db
 *.tmp
 node_modules/
 dist/
+
+.antigravitycli/
