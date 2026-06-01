@@ -53,13 +53,29 @@ async function apiCall(url, method = "GET", body = null) {
     options.body = JSON.stringify(body);
   }
   const res = await fetch(url, options);
-  if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+  if (!res.ok) {
+    let errMsg = `Request failed: ${res.status}`;
+    try {
+      const errBody = await res.json();
+      if (errBody.error) errMsg = errBody.error;
+    } catch (e) {}
+    throw new Error(errMsg);
+  }
   return res.json();
 }
 
 function copy(text, onSuccess) {
   navigator.clipboard.writeText(text);
   if (onSuccess) onSuccess();
+}
+
+function normalizeStatus(statusRaw) {
+  if (!statusRaw) return "";
+  const s = statusRaw.toUpperCase();
+  if (s === "READY_TO_DISPATCH") return "READY_TO_START";
+  if (s === "ACCEPTED") return "DONE";
+  if (s === "REJECTED") return "BLOCKED";
+  return s;
 }
 
 function Card({ title, children, right, className = "" }) {
@@ -78,13 +94,13 @@ export default function App() {
   const [data, setData] = useState(null);
   const [status, setStatus] = useState("Loading workspace...");
   const [error, setError] = useState("");
-  
+
   const [activeTab, setActiveTab] = useState("commandCenter");
   const [selectedTaskId, setSelectedTaskId] = useState("");
   const [selectedCliWorker, setSelectedCliWorker] = useState("codex");
   const [codexCommandMode, setCodexCommandMode] = useState("interactive");
   const [cliCommandText, setCliCommandText] = useState("");
-  
+
   // New Task Form
   const [newObjective, setNewObjective] = useState("");
   const [newProjectSlug, setNewProjectSlug] = useState("");
@@ -92,18 +108,24 @@ export default function App() {
   const [selController, setSelController] = useState("");
   const [selWorker, setSelWorker] = useState("");
   const [selVerifier, setSelVerifier] = useState("");
-  
-  // Task Actions
-  const [responseRole, setResponseRole] = useState("controller");
-  const [responseContent, setResponseContent] = useState("");
-  const [decision, setDecision] = useState("done");
-  const [decisionReason, setDecisionReason] = useState("");
-  const [decisionNextAction, setDecisionNextAction] = useState("");
-  const [pendingConfirmRole, setPendingConfirmRole] = useState(null);
-  
-  // Task Data
+
+  // Data
   const [taskFiles, setTaskFiles] = useState({ dispatch: {}, responses: {}, decisions: [] });
   const [taskLogs, setTaskLogs] = useState({});
+  const [taskTimeline, setTaskTimeline] = useState([]);
+
+  // Forms
+  const [controllerDecision, setControllerDecision] = useState("");
+  const [controllerDecisionContent, setControllerDecisionContent] = useState("");
+
+  const [reportRole, setReportRole] = useState("worker");
+  const [reportContent, setReportContent] = useState("");
+
+  const [verifierReviewStatus, setVerifierReviewStatus] = useState("APPROVED");
+  const [verifierReviewContent, setVerifierReviewContent] = useState("");
+
+  const [finalGateDecision, setFinalGateDecision] = useState("APPROVED");
+  const [finalGateContent, setFinalGateContent] = useState("");
 
   useEffect(() => { loadData(); }, []);
 
@@ -137,7 +159,6 @@ export default function App() {
         if (assigned.verifier) setSelVerifier(assigned.verifier);
       }
       loadTaskFiles();
-      setPendingConfirmRole(null);
     }
   }, [selectedTaskId]);
 
@@ -145,8 +166,10 @@ export default function App() {
     try {
       const files = await apiCall("/api/task/files", "POST", { taskId: selectedTaskId });
       const logs = await apiCall("/api/task/logs", "POST", { taskId: selectedTaskId });
+      const timeline = await apiCall("/api/task/timeline", "POST", { taskId: selectedTaskId });
       setTaskFiles(files);
       setTaskLogs(logs);
+      setTaskTimeline(timeline);
       setError("");
     } catch (err) {
       console.error(err);
@@ -167,6 +190,20 @@ export default function App() {
     }
   }
 
+  async function handleTransition(newStatus) {
+    setError("");
+    setStatus(`Transitioning to ${newStatus}...`);
+    try {
+      await apiCall("/api/task/status", "POST", { taskId: selectedTaskId, status: newStatus });
+      setStatus(`Status updated to ${newStatus}`);
+      await loadData();
+      await loadTaskFiles();
+    } catch (err) {
+      setError(String(err.message));
+      setStatus("Transition failed");
+    }
+  }
+
   async function handleGenerateDispatch() {
     const warns = [];
     [selController, selWorker, selVerifier].forEach(ch => {
@@ -175,22 +212,23 @@ export default function App() {
          warns.push(`${channel.label} is ${channel.readiness_status}`);
        }
     });
-    
+
     if (warns.length > 0) {
        const proceed = window.confirm(`Warnings:\n${warns.join('\n')}\n\nDo you want to proceed?`);
        if (!proceed) return;
     }
 
     setStatus("Generating dispatch packages...");
+    setError("");
     try {
       const channels = { controller: selController, worker: selWorker, verifier: selVerifier };
-      await apiCall("/api/generate-dispatch", "POST", { 
-        projectSlug: newProjectSlug, 
-        objective: activeTask.task.objective, 
+      await apiCall("/api/generate-dispatch", "POST", {
+        projectSlug: newProjectSlug,
+        objective: activeTask.task.objective,
         taskId: selectedTaskId,
         channels
       });
-      setStatus("Dispatch generated");
+      setStatus("Dispatch generated (Status advanced to READY_TO_START)");
       await loadData();
       await loadTaskFiles();
     } catch (err) {
@@ -203,113 +241,186 @@ export default function App() {
       const channelId = assigned[role];
       const channel = data.channels.find(c => c.channel_id === channelId);
       const message = taskFiles.dispatch[role];
-      
+
       if (!message) return setError(`No dispatch message for ${role}. Generate dispatch first.`);
-      
+
       copy(message);
       setStatus(`Prepared: Copied ${role} dispatch.`);
-      
+
       if (channel?.target_url) {
          window.open(channel.target_url, "_blank");
       } else if (channel?.fallback_url) {
          window.open(channel.fallback_url, "_blank");
       }
-      
+
       await apiCall("/api/task/log-event", "POST", { taskId: selectedTaskId, logType: "system", message: `Prepared dispatch for ${role}. Copied to clipboard and opened URL.` });
-      setPendingConfirmRole(role);
       await loadTaskFiles();
   }
 
-  async function handleConfirmSent(role) {
-      const statusMap = { controller: "sent_to_controller", worker: "sent_to_worker", verifier: "sent_to_verifier" };
-      setStatus(`Marking as sent...`);
-      try {
-        await apiCall("/api/task/status", "POST", { taskId: selectedTaskId, status: statusMap[role] });
-        setStatus(`Status updated to ${statusMap[role]}`);
-        setPendingConfirmRole(null);
-        await loadData();
-        await loadTaskFiles();
-      } catch (err) {
-        setError(String(err.message));
-      }
-  }
-
-  async function handleSaveResponse() {
-    setStatus("Saving response...");
-    try {
-      await apiCall("/api/task/response", "POST", { taskId: selectedTaskId, role: responseRole, content: responseContent });
-      setStatus("Response saved");
-      setResponseContent("");
-      await loadData();
-      await loadTaskFiles();
-    } catch (err) {
-      setError(String(err.message));
-    }
-  }
-
-  async function handleSaveDecision() {
-    let finalReason = decisionReason.trim();
-    let finalNextAction = decisionNextAction.trim();
-    
-    if (decision === "done") {
-      if (!finalReason) finalReason = "Dashboard communication-flow test completed successfully.";
-      if (!finalNextAction) finalNextAction = "Close test task.";
-    } else {
-      if (!finalReason) return setError("Reason is required.");
-      if (!finalNextAction) return setError("Next Action is required.");
-    }
-    
+  async function handleSaveControllerDecision() {
     setError("");
-    setStatus("Saving decision...");
+    setStatus("Saving Controller Decision...");
     try {
-      await apiCall("/api/task/decision", "POST", { taskId: selectedTaskId, decision, reason: finalReason, nextAction: finalNextAction });
-      await apiCall("/api/task/status", "POST", { taskId: selectedTaskId, status: decision });
-      setStatus(`Decision saved: ${decision}`);
-      setDecisionReason("");
-      setDecisionNextAction("");
+      await apiCall("/api/task/controller-decision", "POST", { taskId: selectedTaskId, decision: controllerDecision, content: controllerDecisionContent });
+      setControllerDecision("");
+      setControllerDecisionContent("");
+      try {
+        await apiCall("/api/task/status", "POST", { taskId: selectedTaskId, status: "CONTROLLER_PLAN_RECORDED" });
+        setStatus("Controller Decision saved and transitioned to CONTROLLER_PLAN_RECORDED.");
+      } catch (tErr) {
+        setError(`Artifact saved, but status transition failed: ${tErr.message}`);
+        setStatus("Partial success");
+      }
+    } catch (err) {
+      setError(String(err.message));
+    } finally {
+      await loadData();
+      await loadTaskFiles();
+    }
+  }
+
+  async function handleSaveReport(advanceStatus = null) {
+    setError("");
+    setStatus("Saving report...");
+    try {
+      await apiCall("/api/task/report", "POST", { taskId: selectedTaskId, role: reportRole, content: reportContent });
+      setReportContent("");
+      if (advanceStatus) {
+         try {
+           await apiCall("/api/task/status", "POST", { taskId: selectedTaskId, status: advanceStatus });
+           setStatus(`Report saved and transitioned to ${advanceStatus}.`);
+         } catch (tErr) {
+           setError(`Report saved, but transition failed: ${tErr.message}`);
+           setStatus("Partial success");
+         }
+      } else {
+         setStatus("Report saved.");
+      }
+    } catch (err) {
+      setError(String(err.message));
+    } finally {
+      await loadData();
+      await loadTaskFiles();
+    }
+  }
+
+  async function handleSaveVerifierReview() {
+    setError("");
+    setStatus("Saving Verifier Review...");
+    try {
+      await apiCall("/api/task/verifier-review", "POST", { taskId: selectedTaskId, status: verifierReviewStatus, content: verifierReviewContent });
+      setStatus("Verifier Review saved.");
+      setVerifierReviewContent("");
       await loadData();
       await loadTaskFiles();
     } catch (err) {
       setError(String(err.message));
     }
+  }
+
+  async function handleSaveFinalGate() {
+    setError("");
+    setStatus("Saving Final Gate Decision...");
+    try {
+      await apiCall("/api/task/final-gate", "POST", { taskId: selectedTaskId, decision: finalGateDecision, content: finalGateContent });
+      setFinalGateContent("");
+      if (finalGateDecision === "APPROVED") {
+        try {
+          await apiCall("/api/task/status", "POST", { taskId: selectedTaskId, status: "READY_TO_COMMIT" });
+          setStatus("Final Gate Decision saved and transitioned to READY_TO_COMMIT.");
+        } catch (tErr) {
+          setError(`Artifact saved, but transition failed: ${tErr.message}`);
+          setStatus("Partial success");
+        }
+      } else {
+        setStatus("Final Gate Decision saved. (No transition on REJECTED)");
+      }
+    } catch (err) {
+      setError(String(err.message));
+    } finally {
+      await loadData();
+      await loadTaskFiles();
+    }
+  }
+
+  function psQuote(text) {
+    if (typeof text !== 'string') return "''";
+    return "'" + text.replace(/'/g, "''") + "'";
   }
 
   function buildCliWorkerCommand(workerId, task) {
     const objective = (task?.task?.objective || "Workspace task").replace(/\r?\n+/g, " ").trim();
     const taskId = task?.task?.id || selectedTaskId || "TASK-ID";
-    const prompt = [
+    const allowedFiles = Array.isArray(task?.task?.allowed_files) ? task.task.allowed_files : [];
+    const forbiddenFiles = Array.isArray(task?.task?.forbidden_files) ? task.task.forbidden_files : [];
+
+    if (workerId === "codex" && codexCommandMode === "interactive") {
+      return "codex";
+    }
+
+    if (!allowedFiles.length) {
+      return "# Denied: Task scope is missing allowed_files. Provide explicit allowed_files in the task card before generating a command.";
+    }
+
+    const commonRules = [
       `task_id: ${taskId}`,
       `objective: ${objective}`,
-      `manual_safe: true`,
-      `do_not_auto_run: true`,
-      `generate_command_only: true`,
-    ].join("\n");
-
-    const escapedPrompt = prompt.replace(/"/g, '\\"');
-    const allowedFiles = Array.isArray(task?.task?.allowed_files) ? task.task.allowed_files : [];
+      `GOVERNANCE RULES:`,
+      `- READ-FIRST required`,
+      `- read and use workspace skills from D:\\ai-tools\\AI-Workspace\\skills`,
+      `- Use Serena for workspace understanding`,
+      `- Use CodeGraph for dependency / impact review`,
+      `- stay within task allowed_files`,
+      `- respect task forbidden_files`,
+      `- no D:\\lumina-studio`,
+      `- no external product repo edits`,
+      `- no commit/push without owner approval`,
+      `- one worker call at a time`,
+      `- no auto-run`,
+      `- report git diff/status`,
+      `allowed_files: ${allowedFiles.join(", ")}`,
+      `forbidden_files: ${forbiddenFiles.length ? forbiddenFiles.join(", ") : "none explicitly defined"}`
+    ];
 
     if (workerId === "codex") {
-      return codexCommandMode === "exec"
-        ? `codex exec "${escapedPrompt}"`
-        : "codex";
+      return `codex exec ${psQuote(commonRules.join("\n"))}`;
     }
     if (workerId === "agy") {
-      return `agy --add-dir "D:\\ai-tools\\AI-Workspace" --print "${escapedPrompt}"`;
+      return `agy --add-dir 'D:\\ai-tools\\AI-Workspace' --print ${psQuote(commonRules.join("\n"))}`;
     }
     if (workerId === "gemini") {
-      return `gemini -p "<evidence-only prompt>"`;
+      const geminiRules = [
+        `task_id: ${taskId}`,
+        `objective: ${objective}`,
+        `role: evidence-only checker`,
+        `do_not_edit_files: true`,
+        `report evidence only`,
+        `GOVERNANCE RULES:`,
+        `- READ-FIRST required`,
+        `- read and use workspace skills from D:\\ai-tools\\AI-Workspace\\skills`,
+        `- Use Serena for workspace understanding`,
+        `- Use CodeGraph for dependency / impact review`,
+        `- stay within task allowed_files`,
+        `- respect task forbidden_files`,
+        `- no D:\\lumina-studio`,
+        `- no external product repo edits`,
+        `- no commit/push without owner approval`,
+        `- one worker call at a time`,
+        `- no auto-run`,
+        `- report git diff/status`,
+        `allowed_files: ${allowedFiles.join(", ")}`,
+        `forbidden_files: ${forbiddenFiles.length ? forbiddenFiles.join(", ") : "none explicitly defined"}`
+      ];
+      return `gemini -p ${psQuote(geminiRules.join("\n"))}`;
     }
     if (workerId === "opencode") {
-      return `opencode run "${escapedPrompt}"`;
+      return `opencode run ${psQuote(commonRules.join("\n"))}`;
     }
     if (workerId === "aider") {
-      if (!allowedFiles.length) {
-        return "# Aider is manual/guarded. Provide explicit allowed_files in the task card before generating a real command.\naider <allowed files only>";
-      }
       return [
         "# Aider is manual/guarded. Use only with explicit allowed_files and owner approval.",
         `# Allowed files from task card: ${allowedFiles.join(", ")}`,
-        `aider <allowed files only>`
+        `aider ${allowedFiles.map(f => psQuote(f)).join(" ")}`
       ].join("\n");
     }
     return `# Unsupported CLI worker: ${workerId}`;
@@ -339,7 +450,8 @@ export default function App() {
   const tasksByFolder = { inbox: [], active: [], completed: [], blocked: [] };
   data.tasks.forEach(t => tasksByFolder[t.folder]?.push(t));
   const activeTask = data.tasks.find(t => t.name === `${selectedTaskId}.yaml`)?.data;
-  const isDone = activeTask?.task?.status === "done";
+  const currentStatus = normalizeStatus(activeTask?.task?.status);
+  const isDone = currentStatus === "DONE";
 
   // --- RENDERS ---
   const renderNav = () => (
@@ -395,7 +507,7 @@ export default function App() {
             Note: Auto-send, Playwright Bridge, and Subagent Automation are strictly disabled globally.
          </div>
       </Card>
-      
+
       <Card title="Workspace Governance Readiness" className="mt-4">
          <div className="stack-small">
            <div><b>READ-FIRST Policy:</b> {data.governance?.readFirst ? <span className="badge badge-ready" style={{background: '#dcfce7', color: '#166534'}}>Present</span> : <span className="badge badge-needs_config">Missing</span>}</div>
@@ -433,7 +545,7 @@ export default function App() {
               )}
             </div>
           </Card>
-          
+
           <Card title="New Task">
             <label>Project</label>
             <select value={newProjectSlug} onChange={e => setNewProjectSlug(e.target.value)}>
@@ -441,10 +553,10 @@ export default function App() {
             </select>
             <label>Objective</label>
             <textarea value={newObjective} onChange={e => setNewObjective(e.target.value)} rows={3} />
-            
+
             <label className="mt-2">Task ID (Optional)</label>
             <input value={newTaskId} onChange={e => setNewTaskId(e.target.value)} placeholder="Auto-generated if empty" />
-            
+
             <button onClick={handleCreateTask} style={{ marginTop: 12 }}>Create Task</button>
           </Card>
 
@@ -454,13 +566,13 @@ export default function App() {
                 <h3 className="folder-title">{folder.toUpperCase()} ({tasks.length})</h3>
                 <div className="task-list">
                   {tasks.map(t => (
-                    <div 
-                      key={t.name} 
+                    <div
+                      key={t.name}
                       className={`task-item ${selectedTaskId === t.name.replace('.yaml', '') ? 'selected' : ''}`}
                       onClick={() => setSelectedTaskId(t.name.replace('.yaml', ''))}
                     >
                       <div className="task-item-id">{t.name.replace('.yaml', '')}</div>
-                      <div className="task-item-status badge">{t.data?.task?.status}</div>
+                      <div className="task-item-status badge">{normalizeStatus(t.data?.task?.status)}</div>
                     </div>
                   ))}
                   {tasks.length === 0 && <div className="muted">No tasks</div>}
@@ -476,12 +588,11 @@ export default function App() {
           ) : (
             <div className="task-details">
               {isDone && <div className="done-banner">This task is marked as DONE and is read-only.</div>}
-              
+
               <Card title={`Task: ${selectedTaskId}`}>
                 <div className="task-header-grid">
-                  <div><b>Status:</b> <span className="badge">{activeTask.task.status}</span></div>
+                  <div><b>Status:</b> <span className="badge">{currentStatus}</span></div>
                   <div><b>Stage:</b> {activeTask.task.mode}</div>
-                  <div><b>Next Action:</b> {isDone ? 'completed' : (activeTask.task.handoff?.next_role || 'owner')}</div>
                   <div><b>Project:</b> {activeTask.task.project_id}</div>
                 </div>
                 <div style={{ marginTop: 12 }}>
@@ -499,9 +610,36 @@ export default function App() {
                     </div>
                   </div>
                 )}
+
+                <div className="mt-4">
+                   <h4>Lifecycle Controls</h4>
+                   <div className="buttonRow mt-2">
+                     <button onClick={() => handleTransition("CODEX_ORCHESTRATING")} disabled={isDone || currentStatus !== "READY_TO_START"}>Start Codex Orchestration</button>
+                     <button onClick={() => handleTransition("WORKER_RUNNING")} disabled={isDone || currentStatus !== "CODEX_ORCHESTRATING"}>Record Worker Running</button>
+                     <button onClick={() => handleTransition("VALIDATING")} disabled={isDone || currentStatus !== "WORKER_RUNNING"}>Start Validation</button>
+                     <button onClick={() => handleTransition("READY_FOR_FINAL_GATE")} disabled={isDone || currentStatus !== "ORCHESTRATOR_REPORTED"}>Send To Final Gate</button>
+                     <button onClick={() => handleTransition("DONE")} className="btn-start" disabled={isDone || currentStatus !== "READY_TO_COMMIT"}>Mark Done</button>
+                   </div>
+                   <div className="buttonRow mt-2">
+                     <button onClick={() => handleTransition("NEEDS_FIX")} className="btn-pause" disabled={!["WORKER_RUNNING", "VALIDATING", "READY_FOR_FINAL_GATE"].includes(currentStatus)}>Needs Fix</button>
+                     <button onClick={() => handleTransition("BLOCKED")} className="btn-stop" disabled={!["WORKER_RUNNING", "VALIDATING", "READY_FOR_FINAL_GATE"].includes(currentStatus)}>Mark Blocked</button>
+                   </div>
+                </div>
               </Card>
 
               <div className="grid">
+                <Card title="Controller Decision Gate">
+                   <div className="form-group">
+                     <label>Decision Title / Summary</label>
+                     <input value={controllerDecision} onChange={e => setControllerDecision(e.target.value)} disabled={isDone || currentStatus !== "DRAFT"} placeholder="e.g., Proceed with Phase 1" />
+                   </div>
+                   <div className="form-group">
+                     <label>Content (Markdown)</label>
+                     <textarea value={controllerDecisionContent} onChange={e => setControllerDecisionContent(e.target.value)} rows={3} disabled={isDone || currentStatus !== "DRAFT"}></textarea>
+                   </div>
+                   <button onClick={handleSaveControllerDecision} disabled={isDone || currentStatus !== "DRAFT" || !controllerDecision}>Save & Set CONTROLLER_PLAN_RECORDED</button>
+                </Card>
+
                 <Card title="Dispatch Execution Control">
                   <div className="mb-4 p-4" style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '4px' }}>
                     <div className="grid grid-cols-3 gap-4">
@@ -527,50 +665,47 @@ export default function App() {
                   </div>
 
                   <div className="buttonRow mb-4">
-                    <button onClick={handleGenerateDispatch} disabled={isDone}>Generate / Refresh Dispatch</button>
+                    <button onClick={handleGenerateDispatch} disabled={isDone || !["DRAFT", "CONTROLLER_PLAN_RECORDED"].includes(currentStatus)}>Generate Dispatch (Sets READY_TO_START)</button>
                   </div>
-                  
+
                   {['controller', 'worker', 'verifier'].map(role => (
                     <div key={role} className="dispatch-block">
                        <h4>{role.toUpperCase()} Message</h4>
                        <pre>{taskFiles.dispatch[role] || "Not generated yet"}</pre>
-                       
+
                        {taskFiles.dispatch[role] && !isDone && (
                          <div className="execution-controls mt-2">
                            <div className="buttonRow">
-                             <button onClick={() => handlePrepareDispatch(role)} className="btn-start">Start / Prepare</button>
-                             <button onClick={() => setPendingConfirmRole(null)} className="btn-pause" disabled={pendingConfirmRole !== role}>Cancel Prepare</button>
+                             <button onClick={() => handlePrepareDispatch(role)} className="btn-secondary">Copy & Open URL</button>
                            </div>
-                           
-                           {pendingConfirmRole === role && (
-                             <div className="confirm-overlay mt-2">
-                               <p>Message copied and URL opened. Did you paste and send it?</p>
-                               <button onClick={() => handleConfirmSent(role)} className="btn-confirm">Yes, Confirm Sent</button>
-                             </div>
-                           )}
                          </div>
                        )}
                     </div>
                   ))}
                 </Card>
 
-                <Card title="Worker Pool">
-                  <p className="muted mb-4">Manual-safe command generation only. No auto-run, no dispatch automation, no browser control.</p>
-                  <div className="stack-small mb-4">
-                    {WORKER_POOL.map((worker) => (
-                      <div key={worker.id} className={`worker-pill ${worker.runnable ? "worker-pill-runnable" : "worker-pill-info"}`}>
-                        <b>{worker.label}:</b> {worker.description}
-                        {!worker.runnable && <span className="worker-pill-note">Informational only</span>}
-                      </div>
-                    ))}
+                <Card title="CLI Worker Pool">
+                  <p className="muted mb-4">Manual-safe command generation only. No auto-run.</p>
+
+                  <div className="mb-4">
+                    <b>Worker Pool Governance</b>
+                    <ul className="muted guardrail-list" style={{ marginTop: '4px' }}>
+                      <li><b>ChatGPT 5.5:</b> Controller / Final Gate / hard reasoning only</li>
+                      <li><b>Codex CLI:</b> Main local orchestrator</li>
+                      <li><b>agy:</b> Antigravity CLI worker</li>
+                      <li><b>Gemini CLI:</b> Evidence-only checker</li>
+                      <li><b>OpenCode CLI:</b> Fast checker / patch-review worker</li>
+                      <li><b>Aider:</b> Optional patch-only terminal worker</li>
+                    </ul>
                   </div>
-                  <div className="guardrail-box mb-4">
-                    <b>Guardrails</b>
-                    <ul className="muted guardrail-list">
+
+                  <div className="mb-4">
+                    <b>Visible Guardrails</b>
+                    <ul className="muted guardrail-list" style={{ marginTop: '4px' }}>
                       <li>READ-FIRST required</li>
                       <li>Serena required</li>
                       <li>CodeGraph required</li>
-                      <li>no D:\\lumina-studio</li>
+                      <li>no D:\lumina-studio</li>
                       <li>no external product repo edits</li>
                       <li>no commit/push without approval</li>
                       <li>one worker call at a time</li>
@@ -578,13 +713,21 @@ export default function App() {
                       <li>Aider requires explicit allowed_files</li>
                     </ul>
                   </div>
+
+                  {selectedCliWorker === "aider" && (
+                     <div className="guardrail-box mb-4">
+                       <b>Aider Safety Note</b>
+                       <div className="muted">
+                         Aider can edit files. Use only for explicit patch-only tasks with allowed_files and owner approval.
+                       </div>
+                     </div>
+                  )}
+
                   <div className="form-group">
                     <label>CLI Worker Channel</label>
                     <select value={selectedCliWorker} onChange={e => setSelectedCliWorker(e.target.value)}>
                       {RUNNABLE_WORKERS.map((worker) => (
-                        <option key={worker.id} value={worker.id}>
-                          {worker.label}
-                        </option>
+                        <option key={worker.id} value={worker.id}>{worker.label}</option>
                       ))}
                     </select>
                   </div>
@@ -597,97 +740,102 @@ export default function App() {
                       </select>
                     </div>
                   )}
-                  {selectedCliWorker === "aider" && (
-                    <div className="guardrail-box mb-4">
-                      <b>Aider Safety Note</b>
-                      <div className="muted">
-                        Aider can edit files. Use only for explicit patch-only tasks with allowed_files and owner approval.
-                      </div>
-                    </div>
-                  )}
                   <div className="buttonRow mb-4">
                     <button onClick={handleGenerateCliCommand} disabled={!selectedTaskId}>Generate Command</button>
-                    <button
-                      onClick={() => cliCommandText && copy(cliCommandText, () => setStatus("Copied CLI command."))}
-                      disabled={!cliCommandText}
-                      className="btn-secondary"
-                    >
-                      Copy Command
-                    </button>
+                    <button onClick={() => cliCommandText && copy(cliCommandText, () => setStatus("Copied CLI command."))} disabled={!cliCommandText} className="btn-secondary">Copy Command</button>
                   </div>
                   <pre>{cliCommandText || "Select a task and generate a command."}</pre>
+
                   <div className="mt-4">
                     <b>Command patterns</b>
-                    <ul className="muted guardrail-list">
+                    <ul className="muted guardrail-list" style={{ marginTop: '4px' }}>
                       <li><code>codex</code></li>
-                      <li><code>codex exec &quot;&lt;prompt&gt;&quot;</code></li>
-                      <li><code>agy --add-dir &quot;D:\ai-tools\AI-Workspace&quot; --print &quot;&lt;prompt&gt;&quot;</code></li>
-                      <li><code>gemini -p &quot;&lt;evidence-only prompt&gt;&quot;</code></li>
-                      <li><code>opencode run &quot;&lt;prompt&gt;&quot;</code></li>
+                      <li><code>codex exec "&lt;prompt&gt;"</code></li>
+                      <li><code>agy --add-dir "D:\ai-tools\AI-Workspace" --print "&lt;prompt&gt;"</code></li>
+                      <li><code>gemini -p "&lt;evidence-only prompt&gt;"</code></li>
+                      <li><code>opencode run "&lt;prompt&gt;"</code></li>
                       <li><code>aider &lt;allowed files only&gt;</code></li>
                     </ul>
                   </div>
                 </Card>
 
                 <div className="stack">
-                  <Card title="Response Inbox">
+                  <Card title="Typed Report Inbox">
                     <div className="form-group">
                       <label>AI Role</label>
-                      <select value={responseRole} onChange={e => setResponseRole(e.target.value)} disabled={isDone}>
-                        <option value="controller">Controller</option>
+                      <select value={reportRole} onChange={e => setReportRole(e.target.value)} disabled={isDone}>
+                        <option value="orchestrator">Orchestrator</option>
                         <option value="worker">Worker</option>
                         <option value="verifier">Verifier</option>
-                        <option value="final">Final Review</option>
+                        <option value="controller">Controller</option>
+                        <option value="final-gate">Final Gate</option>
                       </select>
                     </div>
                     <div className="form-group">
-                      <label>Paste Response (Markdown)</label>
-                      <textarea value={responseContent} onChange={e => setResponseContent(e.target.value)} rows={6} disabled={isDone}></textarea>
+                      <label>Report Content (Markdown)</label>
+                      <textarea value={reportContent} onChange={e => setReportContent(e.target.value)} rows={4} disabled={isDone}></textarea>
                     </div>
-                    <button onClick={handleSaveResponse} disabled={isDone}>Save Response</button>
-
-                    <h4 className="mt-4">Saved Responses</h4>
-                    {Object.entries(taskFiles.responses).map(([role, content]) => content ? (
-                      <details key={role} style={{marginBottom: 8}}>
-                        <summary className="capitalize">{role} Response</summary>
-                        <pre className="small-pre">{content}</pre>
-                      </details>
-                    ) : null)}
+                    <div className="buttonRow">
+                      <button onClick={() => handleSaveReport(null)} disabled={isDone || !reportContent}>Save Report Only</button>
+                      {reportRole === "orchestrator" && currentStatus === "VALIDATING" && (
+                         <button onClick={() => handleSaveReport("ORCHESTRATOR_REPORTED")} disabled={isDone || !reportContent} className="btn-start">Save & Advance to ORCHESTRATOR_REPORTED</button>
+                      )}
+                    </div>
                   </Card>
 
-                  <Card title="Owner Decision Gate">
+                  <Card title="Verifier Review Gate">
+                    <div className="form-group">
+                      <label>Status</label>
+                      <input value={verifierReviewStatus} onChange={e => setVerifierReviewStatus(e.target.value)} disabled={isDone} placeholder="e.g., PASSED, FAILED" />
+                    </div>
+                    <div className="form-group">
+                      <label>Review Content (Markdown)</label>
+                      <textarea value={verifierReviewContent} onChange={e => setVerifierReviewContent(e.target.value)} rows={3} disabled={isDone}></textarea>
+                    </div>
+                    <button onClick={handleSaveVerifierReview} disabled={isDone}>Save Verifier Review Artifact</button>
+                  </Card>
+
+                  <Card title="Final Gate">
                     <div className="form-group">
                       <label>Decision</label>
-                      <select value={decision} onChange={e => setDecision(e.target.value)} disabled={isDone}>
-                        <option value="done">Done (Stop/Finish)</option>
-                        <option value="accepted">Accept</option>
-                        <option value="revise_requested">Request Revision</option>
-                        <option value="rejected">Reject</option>
-                        <option value="blocked">Block / Pause</option>
-                        <option value="waiting_controller_response">Escalate to Controller</option>
+                      <select value={finalGateDecision} onChange={e => setFinalGateDecision(e.target.value)} disabled={isDone}>
+                        <option value="APPROVED">APPROVED</option>
+                        <option value="REJECTED">REJECTED</option>
                       </select>
                     </div>
                     <div className="form-group">
-                      <label>Reason</label>
-                      <textarea value={decisionReason} onChange={e => setDecisionReason(e.target.value)} rows={2} disabled={isDone} placeholder={decision === 'done' ? 'Auto-fills if empty' : ''}></textarea>
+                      <label>Decision Content (Markdown)</label>
+                      <textarea value={finalGateContent} onChange={e => setFinalGateContent(e.target.value)} rows={3} disabled={isDone}></textarea>
                     </div>
-                    <div className="form-group">
-                      <label>Next Action</label>
-                      <input value={decisionNextAction} onChange={e => setDecisionNextAction(e.target.value)} disabled={isDone} placeholder={decision === 'done' ? 'Auto-fills if empty' : ''} />
-                    </div>
-                    <button onClick={handleSaveDecision} disabled={isDone} className="btn-stop">Confirm & Apply Decision</button>
-                    
-                    {taskFiles.decisions.length > 0 && (
-                       <div className="mt-4">
-                         <h4>Decision History</h4>
-                         {taskFiles.decisions.map((dec, i) => (
-                            <pre key={i} className="small-pre">{dec}</pre>
-                         ))}
-                       </div>
-                    )}
+                    <button onClick={handleSaveFinalGate} disabled={isDone || currentStatus !== "READY_FOR_FINAL_GATE"} className="btn-stop">
+                       Apply Final Gate ({finalGateDecision})
+                    </button>
+                    <p className="muted mt-2">APPROVED unlocks READY_TO_COMMIT.</p>
                   </Card>
                 </div>
               </div>
+
+              <Card title="Lifecycle Timeline">
+                 {taskTimeline.length === 0 ? (
+                   <p className="muted">No events in timeline.</p>
+                 ) : (
+                   <div className="timeline-list stack-small">
+                      {taskTimeline.map((item, idx) => (
+                        <div key={idx} className="timeline-item" style={{ padding: "8px", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "6px" }}>
+                           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
+                             <span style={{ fontSize: "0.85em", color: "#64748b" }}>{item.timestamp}</span>
+                             <span className="badge">{item.type}</span>
+                           </div>
+                           <div style={{ fontWeight: "600", fontSize: "0.9em", marginBottom: "4px" }}>{item.filename}</div>
+                           <details>
+                             <summary style={{ fontSize: "0.85em", cursor: "pointer", color: "#2563eb" }}>View Content</summary>
+                             <pre className="small-pre mt-2">{item.content}</pre>
+                           </details>
+                        </div>
+                      ))}
+                   </div>
+                 )}
+              </Card>
 
               <Card title="Task Logs">
                  <div className="grid">
@@ -727,9 +875,9 @@ export default function App() {
       </header>
 
       {error && <div className="errorBox">{error}</div>}
-      
+
       {renderNav()}
-      
+
       <div className="tab-content">
          {activeTab === 'commandCenter' && renderCommandCenter()}
          {activeTab === 'channels' && renderChannels()}
