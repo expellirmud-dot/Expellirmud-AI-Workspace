@@ -119,6 +119,8 @@ h1, h2, h3, h4, p { margin: 0; }
   flex: 1;
   overflow-y: auto;
   padding-right: 8px;
+  min-width: 0;
+  overflow-x: hidden;
 }
 
 .grid {

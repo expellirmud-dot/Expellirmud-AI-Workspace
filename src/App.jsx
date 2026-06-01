@@ -624,6 +624,15 @@ export default function App() {
                      <button onClick={() => handleTransition("NEEDS_FIX")} className="btn-pause" disabled={!["WORKER_RUNNING", "VALIDATING", "READY_FOR_FINAL_GATE"].includes(currentStatus)}>Needs Fix</button>
                      <button onClick={() => handleTransition("BLOCKED")} className="btn-stop" disabled={!["WORKER_RUNNING", "VALIDATING", "READY_FOR_FINAL_GATE"].includes(currentStatus)}>Mark Blocked</button>
                    </div>
+                   {["NEEDS_FIX", "BLOCKED"].includes(currentStatus) && !isDone && (
+                     <div className="buttonRow mt-2" style={{ padding: "8px", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: "6px" }}>
+                       <b style={{ color: "#991b1b", alignSelf: "center", marginRight: "8px" }}>Recovery:</b>
+                       <button onClick={() => handleTransition("WORKER_RUNNING")} className="btn-secondary">Resume Worker (NEEDS_FIX / BLOCKED)</button>
+                       {currentStatus === "BLOCKED" && (
+                         <button onClick={() => handleTransition("READY_TO_START")} className="btn-secondary">Reset to Start (BLOCKED)</button>
+                       )}
+                     </div>
+                   )}
                 </div>
               </Card>
 
