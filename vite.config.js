@@ -309,10 +309,50 @@ function buildTaskCard(snapshot, objective, title, channels) {
   return { task, taskPath };
 }
 
-function buildDispatchMessages(snapshot, objective, taskId) {
-  const controller = `You are the Controller for LUMINA.\n\nTask ID: ${taskId}\nContext Snapshot: ai-ops-registry/snapshots/active-context/${snapshot.active_context.id}.yaml\n\nObjective:\n${objective}\n\nRules:\n- Manual-safe only.\n- No auto-send.\n- No Playwright bridge.\n- No subagent automation.\n- No CI or deployment.\n- No product repository edits.\n`;
-  const worker = `You are the Worker for LUMINA.\n\nTask ID: ${taskId}\nScope:\n- Use only the registry-approved context.\n- Do not modify product files.\n- Do not run product build.\n- Do not automate dispatch.\n\nRequired tools: ${snapshot.active_context.required_tools.join(", ")}\nRequired runtimes: ${snapshot.active_context.required_runtimes.join(", ")}\n`;
-  const verifier = `You are the Verifier for LUMINA.\n\nTask ID: ${taskId}\nVerify:\n- Registry boundary stayed intact.\n- No files under D:\\\\lumina-studio changed.\n- The active-context snapshot is referenced.\n- The task remained manual-safe.\n`;
+function buildDispatchMessages(snapshot, objective, taskId, channels = {}) {
+  const workerId = channels.worker || "not_assigned";
+  const verifierId = channels.verifier || "not_assigned";
+
+  const controller = `You are the Controller for LUMINA.
+
+role: controller
+task_id: ${taskId}
+objective: ${objective}
+active_context_snapshot: ai-ops-registry/snapshots/active-context/${snapshot.active_context.id}.yaml
+selected_worker: ${workerId}
+selected_verifier: ${verifierId}
+
+rules:
+- Manual-safe only.
+- No auto-send.
+- No Playwright bridge.
+- No subagent automation.
+- No CI or deployment.
+- No product repository edits.
+
+required_output_format: controller_response_v1
+`;
+  const worker = `You are the Worker for LUMINA.
+
+Task ID: ${taskId}
+Scope:
+- Use only the registry-approved context.
+- Do not modify product files.
+- Do not run product build.
+- Do not automate dispatch.
+
+Required tools: ${snapshot.active_context.required_tools.join(", ")}
+Required runtimes: ${snapshot.active_context.required_runtimes.join(", ")}
+`;
+  const verifier = `You are the Verifier for LUMINA.
+
+Task ID: ${taskId}
+Verify:
+- Registry boundary stayed intact.
+- No files under D:\\\\lumina-studio changed.
+- The active-context snapshot is referenced.
+- The task remained manual-safe.
+`;
   
   const dispatchDir = path.join(reportsDir, taskId, "dispatch");
   ensureDir(dispatchDir);
@@ -401,11 +441,12 @@ export default defineConfig({
           const body = await jsonBody(req);
           const { snapshot } = buildSnapshot(body.projectSlug, body.objective || "Dashboard task");
           const taskId = body.taskId || snapshot.active_context.task_id;
-          const output = buildDispatchMessages(snapshot, body.objective || "Dashboard task", taskId);
           
+          let channels = {};
           const taskFile = findTaskFile(taskId);
           if (taskFile) {
             const t = readYaml(taskFile.path);
+            channels = t.task.assigned_channels || {};
             if (t.task.status === 'draft') {
               t.task.status = 'ready_to_dispatch';
               fs.unlinkSync(taskFile.path);
@@ -413,7 +454,8 @@ export default defineConfig({
               logEvent(taskId, 'task', `Status changed to ready_to_dispatch`);
             }
           }
-          
+
+          const output = buildDispatchMessages(snapshot, body.objective || "Dashboard task", taskId, channels);
           res.setHeader("Content-Type", "application/json");
           res.end(JSON.stringify(output));
         });
