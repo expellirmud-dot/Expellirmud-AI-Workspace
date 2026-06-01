@@ -1,0 +1,133 @@
+:root {
+  color-scheme: light;
+  font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+  background: #f4f5f7;
+  color: #1f2937;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+
+.wrap {
+  padding: 20px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+h1, h2, h3, p { margin: 0; }
+
+.statusBox, .errorBox, .card {
+  background: white;
+  border: 1px solid #d9dee7;
+  border-radius: 14px;
+}
+
+.statusBox, .errorBox {
+  padding: 12px 14px;
+  min-width: 260px;
+}
+
+.errorBox {
+  margin-bottom: 16px;
+  color: #9b1c1c;
+  border-color: #f3b4b4;
+  background: #fff5f5;
+}
+
+.card {
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.cardHead {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.stack {
+  display: grid;
+  gap: 8px;
+}
+
+.metaLine {
+  margin-bottom: 10px;
+}
+
+.twoCol {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+label { display: grid; gap: 8px; font-weight: 600; }
+
+select, textarea, input {
+  width: 100%;
+  border: 1px solid #cfd6e2;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font: inherit;
+  background: white;
+}
+
+textarea { min-height: 120px; resize: vertical; }
+
+button {
+  border: 0;
+  background: #111827;
+  color: white;
+  padding: 10px 14px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+button:hover { opacity: 0.93; }
+
+.buttonRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 12px;
+  max-height: 420px;
+  overflow: auto;
+}
+
+.dispatchGrid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.muted { color: #6b7280; }
+
+@media (max-width: 980px) {
+  .grid, .twoCol, .dispatchGrid { grid-template-columns: 1fr; }
+  .topbar { flex-direction: column; }
+}
