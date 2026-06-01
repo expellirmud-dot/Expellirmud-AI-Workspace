@@ -19,6 +19,9 @@ task card explicitly allows it.
 
 ## Required Read Order
 
+> **CRITICAL RULE**: ALL AGENTS MUST OBSERVE THE READ-FIRST POLICY BEFORE TAKING ANY ACTION.
+> See `ai-ops-registry/docs/READ_FIRST_POLICY.md` for full requirements.
+
 1. `README.md`
 2. `WORKSPACE.md`
 3. `workspace-modules.yaml`

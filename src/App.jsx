@@ -1,25 +1,24 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 
-const CHATGPT_URL = "https://chatgpt.com/";
-
-async function readJson(url, options) {
+async function apiCall(url, method = "GET", body = null) {
+  const options = { method };
+  if (body) {
+    options.headers = { "Content-Type": "application/json" };
+    options.body = JSON.stringify(body);
+  }
   const res = await fetch(url, options);
   if (!res.ok) throw new Error(`Request failed: ${res.status}`);
   return res.json();
 }
 
-function downloadText(name, text) {
-  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
-  const link = document.createElement("a");
-  link.href = URL.createObjectURL(blob);
-  link.download = name;
-  link.click();
-  URL.revokeObjectURL(link.href);
+function copy(text, onSuccess) {
+  navigator.clipboard.writeText(text);
+  if (onSuccess) onSuccess();
 }
 
-function Card({ title, children, right }) {
+function Card({ title, children, right, className = "" }) {
   return (
-    <section className="card">
+    <section className={`card ${className}`}>
       <div className="cardHead">
         <h2>{title}</h2>
         {right}
@@ -30,193 +29,468 @@ function Card({ title, children, right }) {
 }
 
 export default function App() {
-  const [workspace, setWorkspace] = useState(null);
-  const [projects, setProjects] = useState([]);
-  const [selectedSlug, setSelectedSlug] = useState("");
-  const [objective, setObjective] = useState("Review LUMINA motion, hover, scroll, and reveal behavior using existing visual context only.");
-  const [taskId, setTaskId] = useState("LUMINA-MOTION-REVIEW-DISPATCH-001");
-  const [snapshot, setSnapshot] = useState(null);
-  const [task, setTask] = useState(null);
-  const [dispatch, setDispatch] = useState(null);
-  const [status, setStatus] = useState("Loading workspace registry...");
+  const [data, setData] = useState(null);
+  const [status, setStatus] = useState("Loading workspace...");
   const [error, setError] = useState("");
+  
+  const [activeTab, setActiveTab] = useState("commandCenter");
+  const [selectedTaskId, setSelectedTaskId] = useState("");
+  
+  // New Task Form
+  const [newObjective, setNewObjective] = useState("");
+  const [newProjectSlug, setNewProjectSlug] = useState("");
+  const [newTaskId, setNewTaskId] = useState("");
+  const [selController, setSelController] = useState("");
+  const [selWorker, setSelWorker] = useState("");
+  const [selVerifier, setSelVerifier] = useState("");
+  
+  // Task Actions
+  const [responseRole, setResponseRole] = useState("controller");
+  const [responseContent, setResponseContent] = useState("");
+  const [decision, setDecision] = useState("done");
+  const [decisionReason, setDecisionReason] = useState("");
+  const [decisionNextAction, setDecisionNextAction] = useState("");
+  const [pendingConfirmRole, setPendingConfirmRole] = useState(null);
+  
+  // Task Data
+  const [taskFiles, setTaskFiles] = useState({ dispatch: {}, responses: {}, decisions: [] });
+  const [taskLogs, setTaskLogs] = useState({});
+
+  useEffect(() => { loadData(); }, []);
+
+  async function loadData() {
+    try {
+      const workspaceData = await apiCall("/api/workspace-data");
+      setData(workspaceData);
+      if (workspaceData.projects?.length > 0 && !newProjectSlug) {
+        setNewProjectSlug(workspaceData.projects[0].slug);
+      }
+      if (workspaceData.channels?.length > 0) {
+        if (!selController) setSelController(workspaceData.channels.find(c => c.role === 'controller')?.channel_id || "");
+        if (!selWorker) setSelWorker(workspaceData.channels.find(c => c.role === 'worker')?.channel_id || "");
+        if (!selVerifier) setSelVerifier(workspaceData.channels.find(c => c.role === 'verifier')?.channel_id || "");
+      }
+      setStatus("Workspace loaded");
+    } catch (err) {
+      setError(String(err.message));
+      setStatus("Failed to load workspace");
+    }
+  }
 
   useEffect(() => {
-    readJson("/api/workspace-data")
-      .then((data) => {
-        setWorkspace(data);
-        setProjects(data.projects || []);
-        const first = data.projects?.[0];
-        setSelectedSlug(first?.slug || "");
-        setStatus("Workspace loaded");
-      })
-      .catch((err) => {
-        setError(String(err.message || err));
-        setStatus("Failed to load workspace");
-      });
-  }, []);
+    if (selectedTaskId) {
+      loadTaskFiles();
+      setPendingConfirmRole(null);
+    }
+  }, [selectedTaskId]);
 
-  const selectedProject = useMemo(
-    () => projects.find((p) => p.slug === selectedSlug) || null,
-    [projects, selectedSlug]
+  async function loadTaskFiles() {
+    try {
+      const files = await apiCall("/api/task/files", "POST", { taskId: selectedTaskId });
+      const logs = await apiCall("/api/task/logs", "POST", { taskId: selectedTaskId });
+      setTaskFiles(files);
+      setTaskLogs(logs);
+      setError("");
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  async function handleCreateTask() {
+    const warns = [];
+    [selController, selWorker, selVerifier].forEach(ch => {
+       const channel = data.channels.find(c => c.channel_id === ch);
+       if (channel && ['unavailable', 'needs_config'].includes(channel.readiness_status)) {
+         warns.push(`${channel.label} is ${channel.readiness_status}`);
+       }
+    });
+    
+    if (warns.length > 0) {
+       const proceed = window.confirm(`Warnings:\n${warns.join('\n')}\n\nDo you want to proceed?`);
+       if (!proceed) return;
+    }
+
+    setStatus("Creating task...");
+    try {
+      const channels = { controller: selController, worker: selWorker, verifier: selVerifier };
+      await apiCall("/api/generate-task", "POST", { projectSlug: newProjectSlug, objective: newObjective, taskId: newTaskId, channels });
+      setStatus("Task created");
+      setNewObjective("");
+      setNewTaskId("");
+      await loadData();
+    } catch (err) {
+      setError(String(err.message));
+    }
+  }
+
+  async function handleGenerateDispatch() {
+    setStatus("Generating dispatch packages...");
+    try {
+      await apiCall("/api/generate-dispatch", "POST", { projectSlug: newProjectSlug, objective: activeTask.task.objective, taskId: selectedTaskId });
+      setStatus("Dispatch generated");
+      await loadData();
+      await loadTaskFiles();
+    } catch (err) {
+      setError(String(err.message));
+    }
+  }
+
+  async function handlePrepareDispatch(role) {
+      const assigned = activeTask.task.assigned_channels || {};
+      const channelId = assigned[role];
+      const channel = data.channels.find(c => c.channel_id === channelId);
+      const message = taskFiles.dispatch[role];
+      
+      if (!message) return setError(`No dispatch message for ${role}. Generate dispatch first.`);
+      
+      copy(message);
+      setStatus(`Prepared: Copied ${role} dispatch.`);
+      
+      if (channel?.target_url) {
+         window.open(channel.target_url, "_blank");
+      } else if (channel?.fallback_url) {
+         window.open(channel.fallback_url, "_blank");
+      }
+      
+      await apiCall("/api/task/log-event", "POST", { taskId: selectedTaskId, logType: "system", message: `Prepared dispatch for ${role}. Copied to clipboard and opened URL.` });
+      setPendingConfirmRole(role);
+      await loadTaskFiles();
+  }
+
+  async function handleConfirmSent(role) {
+      const statusMap = { controller: "sent_to_controller", worker: "sent_to_worker", verifier: "sent_to_verifier" };
+      setStatus(`Marking as sent...`);
+      try {
+        await apiCall("/api/task/status", "POST", { taskId: selectedTaskId, status: statusMap[role] });
+        setStatus(`Status updated to ${statusMap[role]}`);
+        setPendingConfirmRole(null);
+        await loadData();
+        await loadTaskFiles();
+      } catch (err) {
+        setError(String(err.message));
+      }
+  }
+
+  async function handleSaveResponse() {
+    setStatus("Saving response...");
+    try {
+      await apiCall("/api/task/response", "POST", { taskId: selectedTaskId, role: responseRole, content: responseContent });
+      setStatus("Response saved");
+      setResponseContent("");
+      await loadData();
+      await loadTaskFiles();
+    } catch (err) {
+      setError(String(err.message));
+    }
+  }
+
+  async function handleSaveDecision() {
+    let finalReason = decisionReason.trim();
+    let finalNextAction = decisionNextAction.trim();
+    
+    if (decision === "done") {
+      if (!finalReason) finalReason = "Dashboard communication-flow test completed successfully.";
+      if (!finalNextAction) finalNextAction = "Close test task.";
+    } else {
+      if (!finalReason) return setError("Reason is required.");
+      if (!finalNextAction) return setError("Next Action is required.");
+    }
+    
+    setError("");
+    setStatus("Saving decision...");
+    try {
+      await apiCall("/api/task/decision", "POST", { taskId: selectedTaskId, decision, reason: finalReason, nextAction: finalNextAction });
+      await apiCall("/api/task/status", "POST", { taskId: selectedTaskId, status: decision });
+      setStatus(`Decision saved: ${decision}`);
+      setDecisionReason("");
+      setDecisionNextAction("");
+      await loadData();
+      await loadTaskFiles();
+    } catch (err) {
+      setError(String(err.message));
+    }
+  }
+
+  if (!data) return <div className="wrap">Loading...</div>;
+
+  const tasksByFolder = { inbox: [], active: [], completed: [], blocked: [] };
+  data.tasks.forEach(t => tasksByFolder[t.folder]?.push(t));
+  const activeTask = data.tasks.find(t => t.name === `${selectedTaskId}.yaml`)?.data;
+  const isDone = activeTask?.task?.status === "done";
+
+  // --- RENDERS ---
+  const renderNav = () => (
+    <nav className="global-nav">
+      <ul>
+        <li className={activeTab === 'commandCenter' ? 'active' : ''} onClick={() => setActiveTab('commandCenter')}>Command Center</li>
+        <li className={activeTab === 'channels' ? 'active' : ''} onClick={() => setActiveTab('channels')}>AI Channels</li>
+        <li className={activeTab === 'settings' ? 'active' : ''} onClick={() => setActiveTab('settings')}>Settings & Policy</li>
+      </ul>
+    </nav>
   );
 
-  const latestSnapshot = workspace?.activeContexts?.at?.(-1) || null;
-  const latestTask = workspace?.taskCards?.at?.(-1) || null;
+  const renderChannels = () => (
+    <div className="channels-view">
+      <h2>AI Channels & Readiness</h2>
+      <p className="muted mb-4">Registry of known AI endpoints and communication settings.</p>
+      <div className="grid">
+        {data.channels.map(c => (
+           <Card key={c.channel_id} title={c.label}>
+             <div className="stack-small">
+               <div><b>Role:</b> <span className="badge">{c.role}</span></div>
+               <div><b>App:</b> {c.app}</div>
+               <div><b>Binding:</b> {c.binding}</div>
+               <div><b>Readiness:</b> <span className={`badge badge-${c.readiness_status}`}>{c.readiness_status}</span></div>
+               <div><b>Automation:</b> {c.automation_status}</div>
+               <div><b>Dispatch Method:</b> {c.dispatch_method}</div>
+               <div><b>Response Method:</b> {c.response_method}</div>
+               {c.target_url && <div><b>Target URL:</b> <a href={c.target_url} target="_blank" rel="noreferrer">Link</a></div>}
+             </div>
+             {c.limitations && (
+               <div className="mt-4">
+                 <b>Limitations:</b>
+                 <ul className="muted">{c.limitations.map((l, i) => <li key={i}>{l}</li>)}</ul>
+               </div>
+             )}
+           </Card>
+        ))}
+      </div>
+    </div>
+  );
 
-  async function generateSnapshot() {
-    setStatus("Generating snapshot...");
-    const data = await readJson("/api/generate-snapshot", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ projectSlug: selectedSlug, objective })
-    });
-    setSnapshot(data);
-    setStatus(`Snapshot created: ${data.snapshot.active_context.id}`);
-  }
+  const renderSettings = () => (
+    <div className="settings-view">
+      <h2>Automation Policy</h2>
+      <p className="muted mb-4">Strict guardrails currently enforced by the workspace.</p>
+      <Card title="Current Policy Config">
+         <div className="stack-small">
+           {Object.entries(data.automationPolicy).map(([k, v]) => (
+             <div key={k}><b>{k}:</b> {v ? <span style={{color: 'green'}}>TRUE</span> : <span style={{color: 'red'}}>FALSE</span>}</div>
+           ))}
+         </div>
+         <div className="mt-4 muted">
+            Note: Auto-send, Playwright Bridge, and Subagent Automation are strictly disabled globally.
+         </div>
+      </Card>
+      
+      <Card title="Workspace Governance Readiness" className="mt-4">
+         <div className="stack-small">
+           <div><b>READ-FIRST Policy:</b> {data.governance?.readFirst ? <span className="badge badge-ready" style={{background: '#dcfce7', color: '#166534'}}>Present</span> : <span className="badge badge-needs_config">Missing</span>}</div>
+           <div><b>Workspace Skills:</b> {data.governance?.workspaceSkills ? <span className="badge badge-ready" style={{background: '#dcfce7', color: '#166534'}}>Present</span> : <span className="badge badge-needs_config">Missing</span>}</div>
+           <div><b>CodeGraph:</b> {data.governance?.codeGraph === 'ready' ? <span className="badge badge-ready" style={{background: '#dcfce7', color: '#166534'}}>Ready</span> : <span className="badge badge-needs_config">Not Initialized</span>}</div>
+           <div><b>Serena MCP:</b> <span className="badge badge-needs_config">Needs Setup (Project not linked)</span></div>
+         </div>
+      </Card>
+    </div>
+  );
 
-  async function generateTask() {
-    setStatus("Generating task card...");
-    const data = await readJson("/api/generate-task", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ projectSlug: selectedSlug, objective, taskId })
-    });
-    setTask(data);
-    setSnapshot((prev) => prev || { snapshot: data.snapshot });
-    setStatus(`Task card created: ${data.task.task.id}`);
-  }
+  const renderCommandCenter = () => (
+    <div className="main-layout">
+        <aside className="sidebar">
+          <Card title="New Task">
+            <label>Project</label>
+            <select value={newProjectSlug} onChange={e => setNewProjectSlug(e.target.value)}>
+              {data.projects.map(p => <option key={p.slug} value={p.slug}>{p.project.name}</option>)}
+            </select>
+            <label>Objective</label>
+            <textarea value={newObjective} onChange={e => setNewObjective(e.target.value)} rows={3} />
+            
+            <label className="mt-2">Controller Channel</label>
+            <select value={selController} onChange={e => setSelController(e.target.value)}>
+               {data.channels.filter(c => c.role === 'controller').map(c => <option key={c.channel_id} value={c.channel_id}>{c.label} ({c.readiness_status})</option>)}
+            </select>
+            <label className="mt-2">Worker Channel</label>
+            <select value={selWorker} onChange={e => setSelWorker(e.target.value)}>
+               {data.channels.filter(c => c.role === 'worker').map(c => <option key={c.channel_id} value={c.channel_id}>{c.label} ({c.readiness_status})</option>)}
+            </select>
+            <label className="mt-2">Verifier Channel</label>
+            <select value={selVerifier} onChange={e => setSelVerifier(e.target.value)}>
+               {data.channels.filter(c => c.role === 'verifier').map(c => <option key={c.channel_id} value={c.channel_id}>{c.label} ({c.readiness_status})</option>)}
+            </select>
+            
+            <label className="mt-2">Task ID (Optional)</label>
+            <input value={newTaskId} onChange={e => setNewTaskId(e.target.value)} placeholder="Auto-generated if empty" />
+            
+            <button onClick={handleCreateTask} style={{ marginTop: 12 }}>Create Task</button>
+          </Card>
 
-  async function generateDispatch() {
-    setStatus("Generating dispatch messages...");
-    const data = await readJson("/api/generate-dispatch", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ projectSlug: selectedSlug, objective, taskId })
-    });
-    setDispatch(data);
-    setStatus("Dispatch messages ready");
-  }
+          <Card title="Command Center" className="task-list-card">
+            {Object.entries(tasksByFolder).map(([folder, tasks]) => (
+              <div key={folder}>
+                <h3 className="folder-title">{folder.toUpperCase()} ({tasks.length})</h3>
+                <div className="task-list">
+                  {tasks.map(t => (
+                    <div 
+                      key={t.name} 
+                      className={`task-item ${selectedTaskId === t.name.replace('.yaml', '') ? 'selected' : ''}`}
+                      onClick={() => setSelectedTaskId(t.name.replace('.yaml', ''))}
+                    >
+                      <div className="task-item-id">{t.name.replace('.yaml', '')}</div>
+                      <div className="task-item-status badge">{t.data?.task?.status}</div>
+                    </div>
+                  ))}
+                  {tasks.length === 0 && <div className="muted">No tasks</div>}
+                </div>
+              </div>
+            ))}
+          </Card>
+        </aside>
 
-  function copy(text) {
-    navigator.clipboard.writeText(text);
-    setStatus("Copied to clipboard");
-  }
+        <main className="content">
+          {!activeTask ? (
+            <div className="empty-state">Select a task from the Command Center to view details.</div>
+          ) : (
+            <div className="task-details">
+              {isDone && <div className="done-banner">This task is marked as DONE and is read-only.</div>}
+              
+              <Card title={`Task: ${selectedTaskId}`}>
+                <div className="task-header-grid">
+                  <div><b>Status:</b> <span className="badge">{activeTask.task.status}</span></div>
+                  <div><b>Stage:</b> {activeTask.task.mode}</div>
+                  <div><b>Next Action:</b> {isDone ? 'completed' : (activeTask.task.handoff?.next_role || 'owner')}</div>
+                  <div><b>Project:</b> {activeTask.task.project_id}</div>
+                </div>
+                <div style={{ marginTop: 12 }}>
+                  <b>Objective:</b>
+                  <p>{activeTask.task.objective}</p>
+                </div>
+              </Card>
+
+              <div className="grid">
+                <Card title="Dispatch Execution Control">
+                  <div className="buttonRow mb-4">
+                    <button onClick={handleGenerateDispatch} disabled={isDone}>Generate / Refresh Dispatch</button>
+                  </div>
+                  
+                  {['controller', 'worker', 'verifier'].map(role => (
+                    <div key={role} className="dispatch-block">
+                       <h4>{role.toUpperCase()} Message</h4>
+                       <pre>{taskFiles.dispatch[role] || "Not generated yet"}</pre>
+                       
+                       {taskFiles.dispatch[role] && !isDone && (
+                         <div className="execution-controls mt-2">
+                           <div className="buttonRow">
+                             <button onClick={() => handlePrepareDispatch(role)} className="btn-start">Start / Prepare</button>
+                             <button onClick={() => setPendingConfirmRole(null)} className="btn-pause" disabled={pendingConfirmRole !== role}>Cancel Prepare</button>
+                           </div>
+                           
+                           {pendingConfirmRole === role && (
+                             <div className="confirm-overlay mt-2">
+                               <p>Message copied and URL opened. Did you paste and send it?</p>
+                               <button onClick={() => handleConfirmSent(role)} className="btn-confirm">Yes, Confirm Sent</button>
+                             </div>
+                           )}
+                         </div>
+                       )}
+                    </div>
+                  ))}
+                </Card>
+
+                <div className="stack">
+                  <Card title="Response Inbox">
+                    <div className="form-group">
+                      <label>AI Role</label>
+                      <select value={responseRole} onChange={e => setResponseRole(e.target.value)} disabled={isDone}>
+                        <option value="controller">Controller</option>
+                        <option value="worker">Worker</option>
+                        <option value="verifier">Verifier</option>
+                        <option value="final">Final Review</option>
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label>Paste Response (Markdown)</label>
+                      <textarea value={responseContent} onChange={e => setResponseContent(e.target.value)} rows={6} disabled={isDone}></textarea>
+                    </div>
+                    <button onClick={handleSaveResponse} disabled={isDone}>Save Response</button>
+
+                    <h4 className="mt-4">Saved Responses</h4>
+                    {Object.entries(taskFiles.responses).map(([role, content]) => content ? (
+                      <details key={role} style={{marginBottom: 8}}>
+                        <summary className="capitalize">{role} Response</summary>
+                        <pre className="small-pre">{content}</pre>
+                      </details>
+                    ) : null)}
+                  </Card>
+
+                  <Card title="Owner Decision Gate">
+                    <div className="form-group">
+                      <label>Decision</label>
+                      <select value={decision} onChange={e => setDecision(e.target.value)} disabled={isDone}>
+                        <option value="done">Done (Stop/Finish)</option>
+                        <option value="accepted">Accept</option>
+                        <option value="revise_requested">Request Revision</option>
+                        <option value="rejected">Reject</option>
+                        <option value="blocked">Block / Pause</option>
+                        <option value="waiting_controller_response">Escalate to Controller</option>
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label>Reason</label>
+                      <textarea value={decisionReason} onChange={e => setDecisionReason(e.target.value)} rows={2} disabled={isDone} placeholder={decision === 'done' ? 'Auto-fills if empty' : ''}></textarea>
+                    </div>
+                    <div className="form-group">
+                      <label>Next Action</label>
+                      <input value={decisionNextAction} onChange={e => setDecisionNextAction(e.target.value)} disabled={isDone} placeholder={decision === 'done' ? 'Auto-fills if empty' : ''} />
+                    </div>
+                    <button onClick={handleSaveDecision} disabled={isDone} className="btn-stop">Confirm & Apply Decision</button>
+                    
+                    {taskFiles.decisions.length > 0 && (
+                       <div className="mt-4">
+                         <h4>Decision History</h4>
+                         {taskFiles.decisions.map((dec, i) => (
+                            <pre key={i} className="small-pre">{dec}</pre>
+                         ))}
+                       </div>
+                    )}
+                  </Card>
+                </div>
+              </div>
+
+              <Card title="Task Logs">
+                 <div className="grid">
+                   <div>
+                     <h4>System Log</h4>
+                     <pre className="small-pre">{taskLogs.system || "Empty"}</pre>
+                   </div>
+                   <div>
+                     <h4>Task State Log</h4>
+                     <pre className="small-pre">{taskLogs.task || "Empty"}</pre>
+                   </div>
+                   <div>
+                     <h4>Response Log</h4>
+                     <pre className="small-pre">{taskLogs.response || "Empty"}</pre>
+                   </div>
+                   <div>
+                     <h4>Banter Log</h4>
+                     <pre className="small-pre">{taskLogs.banter || "Empty"}</pre>
+                   </div>
+                 </div>
+              </Card>
+            </div>
+          )}
+        </main>
+      </div>
+  );
 
   return (
-    <main className="wrap">
+    <div className="app-container">
       <header className="topbar">
         <div>
-          <h1>Expellirmud AI-Workspace Dashboard</h1>
-          <p>Manual-safe MVP for project-aware snapshots, task cards, and dispatch messages.</p>
+          <h1>Dispatch Control Center</h1>
+          <p>Manual-safe AI orchestration dashboard.</p>
         </div>
         <div className="statusBox">{status}</div>
       </header>
 
-      {error ? <div className="errorBox">{error}</div> : null}
-
-      <Card title="Workspace Home" right={<button onClick={() => window.open(CHATGPT_URL, "_blank", "noopener,noreferrer")}>Open ChatGPT</button>}>
-        <div className="twoCol">
-          <label>
-            Active Project
-            <select value={selectedSlug} onChange={(e) => setSelectedSlug(e.target.value)}>
-              {projects.map((project) => (
-                <option key={project.slug} value={project.slug}>
-                  {project.project.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Objective
-            <textarea value={objective} onChange={(e) => setObjective(e.target.value)} />
-          </label>
-        </div>
-      </Card>
-
-      <div className="grid">
-        <Card title="Project Detail Panel">
-          {selectedProject ? (
-            <div className="stack">
-              <div><b>Path:</b> {selectedProject.project.path}</div>
-              <div><b>Status:</b> {selectedProject.project.status}</div>
-              <div><b>Phase:</b> {selectedProject.project.phase}</div>
-              <div><b>Required tools:</b> {(selectedProject.project.required_tools || []).join(", ")}</div>
-              <div><b>Required runtimes:</b> {(selectedProject.project.required_runtimes || []).join(", ")}</div>
-              <div><b>Allowed models:</b> {(selectedProject.project.allowed_model_ids || []).join(", ")}</div>
-              <div><b>Rules file:</b> {selectedProject.project.rules_file}</div>
-              <div><b>Workflow file:</b> {selectedProject.project.workflow_file}</div>
-            </div>
-          ) : <p className="muted">No project selected.</p>}
-        </Card>
-
-        <Card title="Existing Active Context Snapshot">
-          {latestSnapshot ? (
-            <>
-              <div className="metaLine"><b>File:</b> {latestSnapshot.name}</div>
-              <pre>{JSON.stringify(latestSnapshot.data, null, 2)}</pre>
-            </>
-          ) : <p className="muted">No active-context snapshot found yet.</p>}
-        </Card>
-
-        <Card title="Existing Task Card">
-          {latestTask ? (
-            <>
-              <div className="metaLine"><b>File:</b> {latestTask.name}</div>
-              <pre>{JSON.stringify(latestTask.data, null, 2)}</pre>
-            </>
-          ) : <p className="muted">No task card found yet.</p>}
-        </Card>
-
-        <Card title="Snapshot Builder">
-          <div className="buttonRow">
-            <button onClick={generateSnapshot}>Create Active Context Snapshot</button>
-            {snapshot?.snapshot ? <button onClick={() => copy(JSON.stringify(snapshot.snapshot, null, 2))}>Copy Snapshot</button> : null}
-          </div>
-          <pre>{snapshot?.snapshot ? JSON.stringify(snapshot.snapshot, null, 2) : "No snapshot yet"}</pre>
-        </Card>
-
-        <Card title="Task Card Builder">
-          <div className="buttonRow">
-            <input value={taskId} onChange={(e) => setTaskId(e.target.value)} />
-            <button onClick={generateTask}>Create Task Card</button>
-            {task?.task ? <button onClick={() => copy(JSON.stringify(task.task, null, 2))}>Copy Task</button> : null}
-          </div>
-          <pre>{task?.task ? JSON.stringify(task.task, null, 2) : "No task card yet"}</pre>
-        </Card>
-
-        <Card title="Dispatch Message Preview">
-          <div className="buttonRow">
-            <button onClick={generateDispatch}>Generate Dispatch Messages</button>
-            {dispatch?.controller ? <button onClick={() => copy(dispatch.controller)}>Copy Controller</button> : null}
-            {dispatch?.worker ? <button onClick={() => copy(dispatch.worker)}>Copy Worker</button> : null}
-            {dispatch?.verifier ? <button onClick={() => copy(dispatch.verifier)}>Copy Verifier</button> : null}
-            <button onClick={() => downloadText("dispatch-notes.txt", `ChatGPT: ${CHATGPT_URL}\nRegistry: D:\\ai-tools\\AI-Workspace\\ai-ops-registry`)}>
-              Open Local Note
-            </button>
-          </div>
-          <div className="dispatchGrid">
-            <div>
-              <h3>Controller</h3>
-              <pre>{dispatch?.controller || "No controller message yet"}</pre>
-            </div>
-            <div>
-              <h3>Worker</h3>
-              <pre>{dispatch?.worker || "No worker message yet"}</pre>
-            </div>
-            <div>
-              <h3>Verifier</h3>
-              <pre>{dispatch?.verifier || "No verifier message yet"}</pre>
-            </div>
-          </div>
-        </Card>
-
-        <Card title="Reports / Logs Panel">
-          <ul>
-            {(workspace?.reports || []).slice(0, 50).map((report) => <li key={report}>{report}</li>)}
-          </ul>
-        </Card>
+      {error && <div className="errorBox">{error}</div>}
+      
+      {renderNav()}
+      
+      <div className="tab-content">
+         {activeTab === 'commandCenter' && renderCommandCenter()}
+         {activeTab === 'channels' && renderChannels()}
+         {activeTab === 'settings' && renderSettings()}
       </div>
-    </main>
+    </div>
   );
 }

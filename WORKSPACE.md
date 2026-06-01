@@ -5,6 +5,9 @@
 Expellirmud AI-Workspace is the system-level home for multi-app, multi-model,
 multi-project AI operations.
 
+> **READ-FIRST POLICY ENFORCED**: All agents must read `ai-ops-registry/docs/READ_FIRST_POLICY.md`
+> before attempting any modifications to the workspace or registry.
+
 ## Architecture
 
 ```text
