@@ -338,6 +338,7 @@ function buildTaskCard(snapshot, objective, title, channels) {
 }
 
 function buildDispatchMessages(snapshot, objective, taskId, channels = {}) {
+  const controllerId = channels.controller || "not_assigned";
   const workerId = channels.worker || "not_assigned";
   const verifierId = channels.verifier || "not_assigned";
 
@@ -376,7 +377,44 @@ required_output_format: controller_response_v1
 `;
   const worker = `You are the Worker for LUMINA.
 
-Task ID: ${taskId}
+role: worker
+task_id: ${taskId}
+objective: ${objective}
+active_context_snapshot: ai-ops-registry/snapshots/active-context/${snapshot.active_context.id}.yaml
+selected_controller: ${controllerId}
+selected_verifier: ${verifierId}
+
+workspace_governance_readiness:
+  read_first_policy: ${snapshot.active_context.workspace_governance_readiness.read_first_policy}
+  workspace_skills: ${snapshot.active_context.workspace_governance_readiness.workspace_skills}
+  codegraph: ${snapshot.active_context.workspace_governance_readiness.codegraph}
+  serena_mcp: ${snapshot.active_context.workspace_governance_readiness.serena_mcp}
+
+read_first_sources:
+${snapshot.active_context.read_first_sources.map(s => `  - ${s}`).join("\n")}
+
+allowed_files:
+${snapshot.active_context.allowed_files.map(s => `  - ${s}`).join("\n")}
+
+forbidden_files:
+${snapshot.active_context.forbidden_files.map(s => `  - ${s}`).join("\n")}
+
+tool_preflight:
+  - read_workspace_governance
+  - read_relevant_workspace_skills
+  - confirm_task_boundary
+  - use_serena_for_workspace_understanding_when_needed
+  - use_codegraph_for_dependency_or_impact_review_when_needed
+
+rules:
+- Manual-safe only.
+- No auto-send.
+- No Playwright bridge.
+- No subagent automation.
+- No CI or deployment.
+- No product repository edits.
+
+required_output_format: worker_report_v1
 
 READ-FIRST REQUIRED:
 Before doing anything:
@@ -395,15 +433,6 @@ Worker must not:
 - skip READ-FIRST
 - bypass owner gate
 - claim tool readiness without verifying actual tool output
-
-Scope:
-- Use only the registry-approved context.
-- Do not modify product files.
-- Do not run product build.
-- Do not automate dispatch.
-
-Required tools: ${snapshot.active_context.required_tools.join(", ")}
-Required runtimes: ${snapshot.active_context.required_runtimes.join(", ")}
 `;
   const verifier = `You are the Verifier for LUMINA.
 

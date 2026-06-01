@@ -63,7 +63,8 @@ export default function App() {
       const workspaceData = await apiCall("/api/workspace-data");
       setData(workspaceData);
       if (workspaceData.projects?.length > 0 && !newProjectSlug) {
-        setNewProjectSlug(workspaceData.projects[0].slug);
+        const defaultProject = workspaceData.projects.find(p => p.slug === 'expellirmud-ai-workspace') || workspaceData.projects[0];
+        setNewProjectSlug(defaultProject.slug);
       }
       if (workspaceData.channels?.length > 0) {
         if (!selController) setSelController(workspaceData.channels.find(c => c.role === 'controller')?.channel_id || "");
@@ -284,9 +285,33 @@ export default function App() {
     </div>
   );
 
-  const renderCommandCenter = () => (
+  const renderCommandCenter = () => {
+    const selectedProjectInfo = data.projects.find(p => p.slug === newProjectSlug)?.project;
+    const isExternal = selectedProjectInfo && selectedProjectInfo.path !== "D:\\ai-tools\\AI-Workspace";
+
+    return (
     <div className="main-layout">
         <aside className="sidebar">
+          <Card title="Workspace Info" className="mb-4">
+            <div className="stack-small text-sm">
+              <div><b>Workspace Root:</b> D:\ai-tools\AI-Workspace</div>
+              <div><b>Registry Module:</b> ai-ops-registry</div>
+              <div>
+                <b>Active Project:</b> {selectedProjectInfo?.name || newProjectSlug}
+              </div>
+              {isExternal && (
+                <div className="mt-2 p-2" style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '4px' }}>
+                  <div style={{ color: '#991b1b', fontWeight: 'bold' }}>
+                    <span className="badge" style={{ background: '#ef4444', color: 'white', marginRight: '8px' }}>External product repository</span>
+                  </div>
+                  <div style={{ color: '#b91c1c', marginTop: '4px' }}>
+                    ⚠️ Do not edit unless task card explicitly allows it.
+                  </div>
+                </div>
+              )}
+            </div>
+          </Card>
+          
           <Card title="New Task">
             <label>Project</label>
             <select value={newProjectSlug} onChange={e => setNewProjectSlug(e.target.value)}>
@@ -481,7 +506,8 @@ export default function App() {
           )}
         </main>
       </div>
-  );
+    );
+  };
 
   return (
     <div className="app-container">
