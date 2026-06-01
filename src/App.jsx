@@ -278,7 +278,7 @@ export default function App() {
            <div><b>READ-FIRST Policy:</b> {data.governance?.readFirst ? <span className="badge badge-ready" style={{background: '#dcfce7', color: '#166534'}}>Present</span> : <span className="badge badge-needs_config">Missing</span>}</div>
            <div><b>Workspace Skills:</b> {data.governance?.workspaceSkills ? <span className="badge badge-ready" style={{background: '#dcfce7', color: '#166534'}}>Present</span> : <span className="badge badge-needs_config">Missing</span>}</div>
            <div><b>CodeGraph:</b> {data.governance?.codeGraph === 'ready' ? <span className="badge badge-ready" style={{background: '#dcfce7', color: '#166534'}}>Ready</span> : <span className="badge badge-needs_config">Not Initialized</span>}</div>
-           <div><b>Serena MCP:</b> <span className="badge badge-needs_config">Needs Setup (Project not linked)</span></div>
+           <div><b>Serena MCP:</b> <span className="badge badge-ready" style={{background: '#dcfce7', color: '#166534'}}>Ready (Active Project Mapped)</span></div>
          </div>
       </Card>
     </div>
