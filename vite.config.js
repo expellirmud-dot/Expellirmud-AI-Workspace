@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import YAML from "yaml";
@@ -18,6 +19,36 @@ const dashboardStatePath = path.join(registryDir, "dashboard-state.yaml");
 
 const channelsPath = path.join(registryDir, "registry", "channels.yaml");
 const automationPolicyPath = path.join(registryDir, "registry", "automation-policy.yaml");
+
+
+function checkSafePath(targetRelPath) {
+  const resolved = path.resolve(registryDir, targetRelPath);
+  const rel = path.relative(registryDir, resolved);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error("Path boundary violation: " + targetRelPath);
+  }
+  return resolved;
+}
+
+function validateTaskId(taskId) {
+  if (!taskId || typeof taskId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(taskId)) {
+    throw new Error("Invalid taskId format");
+  }
+  return taskId;
+}
+
+function generateSafeTimestampFilename(prefix) {
+  const iso = new Date().toISOString();
+  const safeIso = iso.replace(/[:.]/g, "-");
+  const suffix = crypto.randomBytes(4).toString('hex');
+  return `${prefix}-${safeIso}-${suffix}.md`;
+}
+
+function writeAppendOnlyArtifact(relPath, content) {
+  const absPath = checkSafePath(relPath);
+  ensureDir(path.dirname(absPath));
+  fs.writeFileSync(absPath, content, { encoding: "utf8", flag: "wx" });
+}
 
 function ensureDir(dirPath) {
   if (!fs.existsSync(dirPath)) {
@@ -70,6 +101,49 @@ function slugify(value) {
     .replace(/^-+|-+$/g, "");
 }
 
+const CANONICAL_STATUSES = [
+  'DRAFT', 'CONTROLLER_PLAN_RECORDED', 'READY_TO_START',
+  'CODEX_ORCHESTRATING', 'WORKER_RUNNING', 'VALIDATING',
+  'ORCHESTRATOR_REPORTED', 'READY_FOR_FINAL_GATE',
+  'READY_TO_COMMIT', 'DONE', 'BLOCKED', 'NEEDS_FIX'
+];
+
+const ALLOWED_TRANSITIONS = {
+  'DRAFT': ['CONTROLLER_PLAN_RECORDED'],
+  'CONTROLLER_PLAN_RECORDED': ['READY_TO_START'],
+  'READY_TO_START': ['CODEX_ORCHESTRATING'],
+  'CODEX_ORCHESTRATING': ['WORKER_RUNNING'],
+  'WORKER_RUNNING': ['VALIDATING', 'BLOCKED', 'NEEDS_FIX'],
+  'VALIDATING': ['ORCHESTRATOR_REPORTED', 'BLOCKED', 'NEEDS_FIX'],
+  'ORCHESTRATOR_REPORTED': ['READY_FOR_FINAL_GATE'],
+  'READY_FOR_FINAL_GATE': ['READY_TO_COMMIT', 'NEEDS_FIX', 'BLOCKED'],
+  'READY_TO_COMMIT': ['DONE'],
+  'BLOCKED': ['READY_TO_START', 'WORKER_RUNNING'],
+  'NEEDS_FIX': ['WORKER_RUNNING']
+};
+
+function normalizeStatus(status) {
+  const upper = String(status).toUpperCase();
+  if (upper === 'READY_TO_DISPATCH') return 'READY_TO_START';
+  if (upper === 'ACCEPTED') return 'DONE';
+  if (upper === 'REJECTED') return 'BLOCKED';
+  return upper;
+}
+
+function validateTransition(fromStatus, toStatus) {
+  if (!CANONICAL_STATUSES.includes(toStatus)) {
+    const err = new Error(`Unknown status: ${toStatus}`);
+    err.status_code = 400;
+    throw err;
+  }
+  const allowed = ALLOWED_TRANSITIONS[fromStatus] || [];
+  if (!allowed.includes(toStatus) && fromStatus !== toStatus) {
+    const err = new Error(`Illegal transition from ${fromStatus} to ${toStatus}`);
+    err.status_code = 409;
+    throw err;
+  }
+}
+
 function ensureDefaults() {
   if (!fs.existsSync(automationPolicyPath)) {
     const defaultPolicy = {
@@ -82,7 +156,7 @@ function ensureDefaults() {
     };
     writeYaml(automationPolicyPath, defaultPolicy);
   }
-  
+
   if (!fs.existsSync(channelsPath)) {
     const defaultChannels = [
       {
@@ -203,9 +277,11 @@ function listAllTasks() {
 }
 
 function getTaskFolderForStatus(status) {
-  if (['draft', 'ready_to_dispatch'].includes(status)) return tasksInboxDir;
-  if (['accepted', 'done'].includes(status)) return tasksCompletedDir;
-  if (['blocked', 'rejected'].includes(status)) return tasksBlockedDir;
+  const s = normalizeStatus(status);
+  if (['DRAFT', 'CONTROLLER_PLAN_RECORDED', 'READY_TO_START'].includes(s)) return tasksInboxDir;
+  if (['CODEX_ORCHESTRATING', 'WORKER_RUNNING', 'VALIDATING', 'ORCHESTRATOR_REPORTED', 'READY_FOR_FINAL_GATE', 'READY_TO_COMMIT'].includes(s)) return tasksActiveDir;
+  if (['DONE'].includes(s)) return tasksCompletedDir;
+  if (['BLOCKED', 'NEEDS_FIX'].includes(s)) return tasksBlockedDir;
   return tasksActiveDir;
 }
 
@@ -219,7 +295,8 @@ function findTaskFile(taskId) {
 }
 
 function logEvent(taskId, logType, message) {
-  const logPath = path.join(reportsDir, taskId, "logs", `${logType}.log.md`);
+  validateTaskId(taskId);
+  const logPath = checkSafePath(path.join("reports", taskId, "logs", `${logType}.log.md`));
   appendText(logPath, `[${isoNow()}] ${message}\n`);
 }
 
@@ -252,7 +329,7 @@ function buildSnapshot(projectSlug, objective) {
       required_skills: profile.skills?.skills || [],
       required_tools: profile.project.required_tools || [],
       required_runtimes: profile.project.required_runtimes || [],
-      allowed_files: profile.slug === 'expellirmud-ai-workspace' 
+      allowed_files: profile.slug === 'expellirmud-ai-workspace'
         ? [
             `${profile.project.path}\\AGENTS.md`,
             `${profile.project.path}\\WORKSPACE.md`,
@@ -309,6 +386,7 @@ function buildSnapshot(projectSlug, objective) {
 
 function buildTaskCard(snapshot, objective, title, channels) {
   const id = title || `${snapshot.active_context.project.id.toUpperCase()}-TASK-${Date.now()}`;
+  validateTaskId(id);
   const task = {
     schema_version: "1.0",
     task: {
@@ -486,15 +564,15 @@ Verify:
 Boundary Verification Note:
 Do not mark required READ-FIRST governance reads as violations if they are listed in allowed_files or read_first_sources.
 `;
-  
+
   const dispatchDir = path.join(reportsDir, taskId, "dispatch");
   ensureDir(dispatchDir);
   writeText(path.join(dispatchDir, "controller.md"), controller);
   writeText(path.join(dispatchDir, "worker.md"), worker);
   writeText(path.join(dispatchDir, "verifier.md"), verifier);
-  
+
   logEvent(taskId, 'system', 'Dispatch messages generated.');
-  
+
   return {
     controllerPath: `ai-ops-registry/reports/${taskId}/dispatch/controller.md`,
     workerPath: `ai-ops-registry/reports/${taskId}/dispatch/worker.md`,
@@ -521,7 +599,7 @@ export default defineConfig({
           const dashboardState = readYaml(dashboardStatePath) || {};
           const channels = readYaml(channelsPath) || [];
           const automationPolicy = readYaml(automationPolicyPath) || {};
-          
+
           const data = {
             workspaceRoot: rootDir,
             registryDir,
@@ -562,137 +640,440 @@ export default defineConfig({
 
         server.middlewares.use("/api/generate-task", async (req, res) => {
           if (req.method !== "POST") return res.end();
-          const body = await jsonBody(req);
-          const { snapshot } = buildSnapshot(body.projectSlug, body.objective || "Dashboard task");
-          const { task, taskPath } = buildTaskCard(snapshot, body.objective || "Dashboard task", body.taskId, body.channels);
-          res.setHeader("Content-Type", "application/json");
-          res.end(JSON.stringify({ task, taskPath, snapshotId: snapshot.active_context.id }));
+          try {
+            const body = await jsonBody(req);
+            if (body.taskId) validateTaskId(body.taskId);
+            const { snapshot } = buildSnapshot(body.projectSlug, body.objective || "Dashboard task");
+            const { task, taskPath } = buildTaskCard(snapshot, body.objective || "Dashboard task", body.taskId, body.channels);
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ task, taskPath, snapshotId: snapshot.active_context.id }));
+          } catch (e) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: e.message }));
+          }
         });
 
         server.middlewares.use("/api/generate-dispatch", async (req, res) => {
           if (req.method !== "POST") return res.end();
-          const body = await jsonBody(req);
-          const { snapshot } = buildSnapshot(body.projectSlug, body.objective || "Dashboard task");
-          const taskId = body.taskId || snapshot.active_context.task_id;
-          
-          let channels = {};
-          const taskFile = findTaskFile(taskId);
-          if (taskFile) {
+          try {
+            const body = await jsonBody(req);
+            const taskId = validateTaskId(body.taskId);
+
+            const taskFile = findTaskFile(taskId);
+            if (!taskFile) {
+              res.statusCode = 404;
+              return res.end(JSON.stringify({ error: "Task not found" }));
+            }
+
             const t = readYaml(taskFile.path);
-            channels = t.task.assigned_channels || {};
-            if (t.task.status === 'draft') {
-              t.task.status = 'ready_to_dispatch';
+            let channels = t.task.assigned_channels || {};
+
+            let snapshotRelPath = t.task.active_context_snapshot;
+            if (snapshotRelPath.startsWith("ai-ops-registry/")) {
+              snapshotRelPath = snapshotRelPath.replace("ai-ops-registry/", "");
+            }
+
+            const resolvedSnapshotPath = path.resolve(registryDir, snapshotRelPath);
+            const snapshotRelToDir = path.relative(snapshotsDir, resolvedSnapshotPath);
+            if (snapshotRelToDir.startsWith('..') || path.isAbsolute(snapshotRelToDir)) {
+              res.statusCode = 400;
+              return res.end(JSON.stringify({ error: "Snapshot must be located in snapshots/active-context" }));
+            }
+            const snapshotAbsPath = resolvedSnapshotPath;
+            const snapshotData = readYaml(snapshotAbsPath);
+
+            if (!snapshotData) {
+              res.statusCode = 404;
+              return res.end(JSON.stringify({ error: "Snapshot not found" }));
+            }
+
+            const currentStatus = normalizeStatus(t.task.status);
+            if (['DRAFT', 'CONTROLLER_PLAN_RECORDED'].includes(currentStatus)) {
+              const decDir = checkSafePath(path.join("reports", taskId, "decisions"));
+              if (!fs.existsSync(decDir) || !fs.readdirSync(decDir).some(f => f.startsWith('controller-'))) {
+                res.statusCode = 409;
+                return res.end(JSON.stringify({ error: "Cannot dispatch: Missing controller decision artifact" }));
+              }
+              if (currentStatus === 'DRAFT') {
+                validateTransition('DRAFT', 'CONTROLLER_PLAN_RECORDED');
+                logEvent(taskId, 'task', `Status changed from DRAFT to CONTROLLER_PLAN_RECORDED via dispatch (artifact detected)`);
+              }
+              validateTransition('CONTROLLER_PLAN_RECORDED', 'READY_TO_START');
+
+              t.task.status = 'READY_TO_START';
               fs.unlinkSync(taskFile.path);
               writeYaml(path.join(tasksInboxDir, `${taskId}.yaml`), t);
-              logEvent(taskId, 'task', `Status changed to ready_to_dispatch`);
+              logEvent(taskId, 'task', `Status changed from CONTROLLER_PLAN_RECORDED to READY_TO_START via dispatch`);
             }
-          }
 
-          const output = buildDispatchMessages(snapshot, body.objective || "Dashboard task", taskId, channels);
-          res.setHeader("Content-Type", "application/json");
-          res.end(JSON.stringify(output));
+            const output = buildDispatchMessages(snapshotData, t.task.objective || "Dashboard task", taskId, channels);
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify(output));
+          } catch (e) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: e.message }));
+          }
         });
 
         server.middlewares.use("/api/task/status", async (req, res) => {
           if (req.method !== "POST") return res.end();
-          const { taskId, status } = await jsonBody(req);
-          const taskFile = findTaskFile(taskId);
-          if (!taskFile) {
-            res.statusCode = 404;
-            return res.end(JSON.stringify({ error: "Task not found" }));
+          try {
+            const body = await jsonBody(req);
+            const taskId = validateTaskId(body.taskId);
+            const status = body.status;
+
+            const taskFile = findTaskFile(taskId);
+            if (!taskFile) {
+              res.statusCode = 404;
+              return res.end(JSON.stringify({ error: "Task not found" }));
+            }
+
+            const t = readYaml(taskFile.path);
+            const oldStatus = normalizeStatus(t.task.status);
+            const newStatus = normalizeStatus(status);
+
+            validateTransition(oldStatus, newStatus);
+
+            if (newStatus === 'READY_TO_START') {
+              const decDir = checkSafePath(path.join("reports", taskId, "decisions"));
+              if (!fs.existsSync(decDir) || !fs.readdirSync(decDir).some(f => f.startsWith('controller-'))) {
+                res.statusCode = 409;
+                return res.end(JSON.stringify({ error: "Missing controller decision artifact" }));
+              }
+            }
+
+            if (newStatus === 'READY_TO_COMMIT') {
+              const decDir = checkSafePath(path.join("reports", taskId, "decisions"));
+              let approved = false;
+              if (fs.existsSync(decDir)) {
+                const files = fs.readdirSync(decDir).filter(f => f.startsWith('final-gate-')).sort();
+                if (files.length > 0) {
+                  const lastFile = files[files.length - 1];
+                  const contentPath = checkSafePath(path.join("reports", taskId, "decisions", lastFile));
+                  const text = readText(contentPath);
+                  if (text.includes('decision: APPROVED') || text.includes('decision: "APPROVED"')) {
+                    approved = true;
+                  }
+                }
+              }
+              if (!approved) {
+                res.statusCode = 409;
+                return res.end(JSON.stringify({ error: "Missing approving final-gate artifact" }));
+              }
+            }
+
+            t.task.status = newStatus; // persist uppercase
+
+            const newDir = getTaskFolderForStatus(newStatus);
+            const newPath = path.join(newDir, `${taskId}.yaml`);
+
+            if (taskFile.path !== newPath) {
+               fs.unlinkSync(taskFile.path);
+            }
+            writeYaml(newPath, t);
+            logEvent(taskId, 'task', `Status changed from ${oldStatus} to ${newStatus}. Moved to ${path.basename(newDir)} folder.`);
+
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ success: true, task: t }));
+          } catch (e) {
+            res.statusCode = e.status_code || 409;
+            if (e.message.includes('Path boundary') || e.message.includes('Invalid taskId')) res.statusCode = 400;
+            res.end(JSON.stringify({ error: e.message }));
           }
-          const t = readYaml(taskFile.path);
-          const oldStatus = t.task.status;
-          t.task.status = status;
-          
-          const newDir = getTaskFolderForStatus(status);
-          const newPath = path.join(newDir, `${taskId}.yaml`);
-          
-          if (taskFile.path !== newPath) {
-             fs.unlinkSync(taskFile.path);
-          }
-          writeYaml(newPath, t);
-          logEvent(taskId, 'task', `Status changed from ${oldStatus} to ${status}. Moved to ${path.basename(newDir)} folder.`);
-          
-          res.setHeader("Content-Type", "application/json");
-          res.end(JSON.stringify({ success: true, task: t }));
         });
 
         server.middlewares.use("/api/task/log-event", async (req, res) => {
           if (req.method !== "POST") return res.end();
-          const { taskId, logType, message } = await jsonBody(req);
-          logEvent(taskId, logType, message);
-          res.setHeader("Content-Type", "application/json");
-          res.end(JSON.stringify({ success: true }));
+          try {
+            const { taskId, logType, message } = await jsonBody(req);
+            validateTaskId(taskId);
+            if (!findTaskFile(taskId)) {
+               res.statusCode = 404;
+               return res.end(JSON.stringify({ error: "Task not found" }));
+            }
+            if (!['system', 'task', 'response', 'banter', 'error'].includes(logType)) {
+               res.statusCode = 400;
+               return res.end(JSON.stringify({ error: "Invalid logType" }));
+            }
+            logEvent(taskId, logType, message);
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ success: true }));
+          } catch (e) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: e.message }));
+          }
         });
 
         server.middlewares.use("/api/task/response", async (req, res) => {
           if (req.method !== "POST") return res.end();
-          const { taskId, role, content } = await jsonBody(req);
-          
-          const responsePath = path.join(reportsDir, taskId, "responses", `${role}-response.md`);
-          writeText(responsePath, content);
-          logEvent(taskId, 'response', `Received response from ${role}. Saved to responses/${role}-response.md`);
-          
-          res.setHeader("Content-Type", "application/json");
-          res.end(JSON.stringify({ success: true }));
+          try {
+            const { taskId, role, content } = await jsonBody(req);
+            validateTaskId(taskId);
+            if (!findTaskFile(taskId)) {
+               res.statusCode = 404;
+               return res.end(JSON.stringify({ error: "Task not found" }));
+            }
+            if (!content) throw new Error("Content is required");
+            if (!['controller', 'worker', 'verifier', 'orchestrator', 'final-gate'].includes(role)) {
+               res.statusCode = 400;
+               return res.end(JSON.stringify({ error: "Invalid role" }));
+            }
+            const responsePath = checkSafePath(path.join("reports", taskId, "responses", `${role}-response.md`));
+            writeText(responsePath, content);
+            logEvent(taskId, 'response', `Received response from ${role}. Saved to responses/${role}-response.md`);
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ success: true }));
+          } catch (e) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: e.message }));
+          }
         });
 
         server.middlewares.use("/api/task/decision", async (req, res) => {
           if (req.method !== "POST") return res.end();
-          const { taskId, decision, reason, nextAction } = await jsonBody(req);
-          
-          const timestamp = isoNow().replace(/[:.]/g, "-");
-          const decisionPath = path.join(reportsDir, taskId, "decisions", `owner-decision-${timestamp}.md`);
-          
-          const content = `# Owner Decision
+          try {
+            const { taskId, decision, reason, nextAction } = await jsonBody(req);
+            validateTaskId(taskId);
+            if (!findTaskFile(taskId)) {
+               res.statusCode = 404;
+               return res.end(JSON.stringify({ error: "Task not found" }));
+            }
+            if (!decision) throw new Error("Decision is required");
+            const filename = generateSafeTimestampFilename('owner-decision');
+            const contentStr = `# Owner Decision
 - **Decision:** ${decision}
-- **Timestamp:** ${isoNow()}
+- **Timestamp:** ${new Date().toISOString()}
 - **Reason:** ${reason}
 - **Next Action:** ${nextAction}
 `;
-          writeText(decisionPath, content);
-          logEvent(taskId, 'task', `Owner decision: ${decision}. Reason: ${reason}`);
-          
-          res.setHeader("Content-Type", "application/json");
-          res.end(JSON.stringify({ success: true }));
+            writeAppendOnlyArtifact(path.join("reports", taskId, "decisions", filename), contentStr);
+            logEvent(taskId, 'task', `Owner decision: ${decision}. Reason: ${reason}`);
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ success: true }));
+          } catch (e) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: e.message }));
+          }
         });
 
         server.middlewares.use("/api/task/logs", async (req, res) => {
           if (req.method !== "POST") return res.end();
-          const { taskId } = await jsonBody(req);
-          const logsDir = path.join(reportsDir, taskId, "logs");
-          const logs = {
-            system: readText(path.join(logsDir, "system.log.md")),
-            task: readText(path.join(logsDir, "task.log.md")),
-            response: readText(path.join(logsDir, "response.log.md")),
-            banter: readText(path.join(logsDir, "banter.log.md"))
-          };
-          res.setHeader("Content-Type", "application/json");
-          res.end(JSON.stringify(logs));
+          try {
+            const { taskId } = await jsonBody(req);
+            validateTaskId(taskId);
+            if (!findTaskFile(taskId)) {
+               res.statusCode = 404;
+               return res.end(JSON.stringify({ error: "Task not found" }));
+            }
+            const logsDir = checkSafePath(path.join("reports", taskId, "logs"));
+            const logs = {
+              system: readText(path.join(logsDir, "system.log.md")),
+              task: readText(path.join(logsDir, "task.log.md")),
+              response: readText(path.join(logsDir, "response.log.md")),
+              banter: readText(path.join(logsDir, "banter.log.md"))
+            };
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify(logs));
+          } catch (e) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: e.message }));
+          }
         });
 
         server.middlewares.use("/api/task/files", async (req, res) => {
            if (req.method !== "POST") return res.end();
-           const { taskId } = await jsonBody(req);
-           const dispatchDir = path.join(reportsDir, taskId, "dispatch");
-           const responsesDir = path.join(reportsDir, taskId, "responses");
-           const decisionsDir = path.join(reportsDir, taskId, "decisions");
-           res.setHeader("Content-Type", "application/json");
-           res.end(JSON.stringify({
-              dispatch: {
-                 controller: readText(path.join(dispatchDir, "controller.md")),
-                 worker: readText(path.join(dispatchDir, "worker.md")),
-                 verifier: readText(path.join(dispatchDir, "verifier.md"))
-              },
-              responses: {
-                 controller: readText(path.join(responsesDir, "controller-response.md")),
-                 worker: readText(path.join(responsesDir, "worker-response.md")),
-                 verifier: readText(path.join(responsesDir, "verifier-response.md")),
-                 final: readText(path.join(responsesDir, "final-review.md"))
-              },
-              decisions: fs.existsSync(decisionsDir) ? fs.readdirSync(decisionsDir).map(f => readText(path.join(decisionsDir, f))) : []
-           }));
+           try {
+             const { taskId } = await jsonBody(req);
+             validateTaskId(taskId);
+             if (!findTaskFile(taskId)) {
+                res.statusCode = 404;
+                return res.end(JSON.stringify({ error: "Task not found" }));
+             }
+             const dispatchDir = checkSafePath(path.join("reports", taskId, "dispatch"));
+             const responsesDir = checkSafePath(path.join("reports", taskId, "responses"));
+             const decisionsDir = checkSafePath(path.join("reports", taskId, "decisions"));
+             res.setHeader("Content-Type", "application/json");
+             res.end(JSON.stringify({
+                dispatch: {
+                   controller: readText(path.join(dispatchDir, "controller.md")),
+                   worker: readText(path.join(dispatchDir, "worker.md")),
+                   verifier: readText(path.join(dispatchDir, "verifier.md"))
+                },
+                responses: {
+                   controller: readText(path.join(responsesDir, "controller-response.md")),
+                   worker: readText(path.join(responsesDir, "worker-response.md")),
+                   verifier: readText(path.join(responsesDir, "verifier-response.md")),
+                   final: readText(path.join(responsesDir, "final-review.md"))
+                },
+                decisions: fs.existsSync(decisionsDir) ? fs.readdirSync(decisionsDir).map(f => readText(path.join(decisionsDir, f))) : []
+             }));
+           } catch (e) {
+             res.statusCode = 400;
+             res.end(JSON.stringify({ error: e.message }));
+           }
+        });
+
+        server.middlewares.use("/api/task/controller-decision", async (req, res) => {
+          if (req.method !== "POST") return res.end();
+          try {
+            const { taskId, decision, content } = await jsonBody(req);
+            validateTaskId(taskId);
+            if (!findTaskFile(taskId)) {
+              res.statusCode = 404;
+              return res.end(JSON.stringify({ error: "Task not found" }));
+            }
+            if (!decision) {
+              res.statusCode = 400;
+              return res.end(JSON.stringify({ error: "Decision is required" }));
+            }
+            const filename = generateSafeTimestampFilename('controller');
+            writeAppendOnlyArtifact(path.join("reports", taskId, "decisions", filename), content || `# Controller Decision
+
+Decision: ${decision}
+`);
+            logEvent(taskId, 'task', `Controller decision: ${decision}`);
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ success: true }));
+          } catch (e) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: e.message }));
+          }
+        });
+
+        server.middlewares.use("/api/task/report", async (req, res) => {
+          if (req.method !== "POST") return res.end();
+          try {
+            const { taskId, role, content } = await jsonBody(req);
+            validateTaskId(taskId);
+            if (!findTaskFile(taskId)) {
+              res.statusCode = 404;
+              return res.end(JSON.stringify({ error: "Task not found" }));
+            }
+            if (!content) {
+              res.statusCode = 400;
+              return res.end(JSON.stringify({ error: "Content is required" }));
+            }
+            if (!['orchestrator', 'worker', 'verifier', 'controller', 'final-gate'].includes(role)) {
+              res.statusCode = 400;
+              return res.end(JSON.stringify({ error: "Invalid role" }));
+            }
+            const filename = generateSafeTimestampFilename(role);
+            writeAppendOnlyArtifact(path.join("reports", taskId, "reports", filename), content);
+            logEvent(taskId, 'report', `Received report from ${role}.`);
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ success: true }));
+          } catch (e) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: e.message }));
+          }
+        });
+
+        server.middlewares.use("/api/task/verifier-review", async (req, res) => {
+          if (req.method !== "POST") return res.end();
+          try {
+            const { taskId, status, content } = await jsonBody(req);
+            validateTaskId(taskId);
+            if (!findTaskFile(taskId)) {
+              res.statusCode = 404;
+              return res.end(JSON.stringify({ error: "Task not found" }));
+            }
+            if (!status) {
+              res.statusCode = 400;
+              return res.end(JSON.stringify({ error: "Status is required" }));
+            }
+            const filename = generateSafeTimestampFilename('verifier');
+            writeAppendOnlyArtifact(path.join("reports", taskId, "reviews", filename), content || `# Verifier Review
+
+Status: ${status}
+`);
+            logEvent(taskId, 'task', `Verifier review: ${status}`);
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ success: true }));
+          } catch (e) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: e.message }));
+          }
+        });
+
+        server.middlewares.use("/api/task/final-gate", async (req, res) => {
+          if (req.method !== "POST") return res.end();
+          try {
+            const { taskId, decision, content } = await jsonBody(req);
+            validateTaskId(taskId);
+            if (!findTaskFile(taskId)) {
+              res.statusCode = 404;
+              return res.end(JSON.stringify({ error: "Task not found" }));
+            }
+            if (!decision) {
+              res.statusCode = 400;
+              return res.end(JSON.stringify({ error: "Decision is required" }));
+            }
+            const canonicalDecision = String(decision).toUpperCase();
+            if (!['APPROVED', 'REJECTED'].includes(canonicalDecision)) {
+              res.statusCode = 400;
+              return res.end(JSON.stringify({ error: "Decision must be APPROVED or REJECTED" }));
+            }
+            const filename = generateSafeTimestampFilename('final-gate');
+            const finalContent = `---\ndecision: ${canonicalDecision}\n---\n${content || `# Final Gate Decision\n`}`;
+            writeAppendOnlyArtifact(path.join("reports", taskId, "decisions", filename), finalContent);
+            logEvent(taskId, 'task', `Final gate decision: ${canonicalDecision}`);
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ success: true }));
+          } catch (e) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: e.message }));
+          }
+        });
+
+        server.middlewares.use("/api/task/timeline", async (req, res) => {
+          if (req.method !== "POST") return res.end();
+          try {
+            const { taskId } = await jsonBody(req);
+            validateTaskId(taskId);
+            if (!findTaskFile(taskId)) {
+               res.statusCode = 404;
+               return res.end(JSON.stringify({ error: "Task not found" }));
+            }
+            const taskDir = checkSafePath(path.join("reports", taskId));
+            const entries = [];
+
+            if (fs.existsSync(taskDir)) {
+               ['decisions', 'reports', 'reviews', 'logs'].forEach(dirName => {
+                  const subDir = path.join(taskDir, dirName);
+                  if (fs.existsSync(subDir)) {
+                     fs.readdirSync(subDir).forEach(f => {
+                       let ts = "1970-01-01T00:00:00.000Z";
+                       const match = f.match(/(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)/);
+                       if (match) {
+                         ts = match[1].replace(/-(\d{2})-(\d{2})-(\d{3}Z)$/, ':$1:$2.$3');
+                       } else {
+                         const content = readText(path.join(subDir, f));
+                         const tsMatch = content.match(/(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z)/);
+                         if (tsMatch) ts = tsMatch[1];
+                       }
+                       entries.push({
+                         type: dirName,
+                         filename: f,
+                         timestamp: ts,
+                         content: readText(path.join(subDir, f))
+                       });
+                     });
+                  }
+               });
+            }
+
+            entries.sort((a, b) => {
+              if (a.timestamp < b.timestamp) return -1;
+              if (a.timestamp > b.timestamp) return 1;
+              return a.filename.localeCompare(b.filename);
+            });
+
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify(entries));
+          } catch (e) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: e.message }));
+          }
         });
 
       }
