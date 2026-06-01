@@ -354,6 +354,17 @@ export default function App() {
                   <b>Objective:</b>
                   <p>{activeTask.task.objective}</p>
                 </div>
+                {activeTask.task.workspace_governance_readiness && (
+                  <div style={{ marginTop: 12, padding: "8px", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "4px" }}>
+                    <b>Workspace Governance Readiness:</b>
+                    <div className="stack-small mt-2" style={{ fontSize: "0.9em" }}>
+                      <div><b>READ-FIRST Policy:</b> <span className="badge badge-ready" style={{background: '#dcfce7', color: '#166534'}}>{activeTask.task.workspace_governance_readiness.read_first_policy}</span></div>
+                      <div><b>Workspace Skills:</b> <span className="badge badge-ready" style={{background: '#dcfce7', color: '#166534'}}>{activeTask.task.workspace_governance_readiness.workspace_skills}</span></div>
+                      <div><b>CodeGraph:</b> <span className="badge badge-ready" style={{background: '#dcfce7', color: '#166534'}}>{activeTask.task.workspace_governance_readiness.codegraph}</span></div>
+                      <div><b>Serena MCP:</b> <span className="badge badge-ready" style={{background: '#dcfce7', color: '#166534'}}>{activeTask.task.workspace_governance_readiness.serena_mcp}</span></div>
+                    </div>
+                  </div>
+                )}
               </Card>
 
               <div className="grid">

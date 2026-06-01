@@ -263,6 +263,21 @@ function buildSnapshot(projectSlug, objective) {
         "python -c \"import yaml, pathlib; yaml.safe_load(pathlib.Path(r'D:\\ai-tools\\AI-Workspace\\ai-ops-registry\\projects\\lumina-studio\\project.yaml').read_text(encoding='utf-8')); print('PROJECT_YAML_OK')\"",
       ],
       notes: ["Immutable once dispatched."],
+      workspace_governance_readiness: {
+        read_first_policy: "present",
+        workspace_skills: "present",
+        codegraph: "ready",
+        serena_mcp: "ready_active_project_mapped"
+      },
+      read_first_sources: [
+        "AGENTS.md",
+        "WORKSPACE.md",
+        "workspace-modules.yaml",
+        "ai-ops-registry/AGENTS.md",
+        "ai-ops-registry/docs/READ_FIRST_POLICY.md",
+        "ai-ops-registry/docs/WORKSPACE_GOVERNANCE.md",
+        "ai-ops-registry/docs/TOOL_PREFLIGHT.md"
+      ]
     },
   };
   const snapshotPath = path.join(snapshotsDir, `${snapshot.active_context.id}.yaml`);
@@ -300,6 +315,19 @@ function buildTaskCard(snapshot, objective, title, channels) {
       validation_commands: snapshot.active_context.validation_commands,
       outputs: ["worker-report", "verifier-report", "manual-dispatch-message"],
       handoff: { next_role: "verifier", automatic_dispatch: false, owner_approval_required: true },
+      workspace_governance_readiness: {
+        read_first_policy: "present",
+        workspace_skills: "present",
+        codegraph: "ready",
+        serena_mcp: "ready_active_project_mapped"
+      },
+      required_preflight: [
+        "read_workspace_governance",
+        "read_relevant_workspace_skills",
+        "confirm_task_boundary",
+        "use_serena_for_workspace_understanding_when_needed",
+        "use_codegraph_for_dependency_or_impact_review_when_needed"
+      ]
     },
   };
   const taskPath = path.join(tasksInboxDir, `${task.task.id}.yaml`);
@@ -315,12 +343,26 @@ function buildDispatchMessages(snapshot, objective, taskId, channels = {}) {
 
   const controller = `You are the Controller for LUMINA.
 
+Governance Readiness:
+- READ-FIRST Policy: Present
+- Workspace Skills: Present
+- CodeGraph: Ready
+- Serena MCP: Ready
+
 role: controller
 task_id: ${taskId}
 objective: ${objective}
 active_context_snapshot: ai-ops-registry/snapshots/active-context/${snapshot.active_context.id}.yaml
 selected_worker: ${workerId}
 selected_verifier: ${verifierId}
+
+Controller must:
+- read governance context first
+- respect manual-safe policy
+- use selected_worker and selected_verifier from task card
+- not assume missing dashboard state
+- request clarification if active context is missing
+- recommend whether Worker should use Serena or CodeGraph
 
 rules:
 - Manual-safe only.
@@ -335,6 +377,25 @@ required_output_format: controller_response_v1
   const worker = `You are the Worker for LUMINA.
 
 Task ID: ${taskId}
+
+READ-FIRST REQUIRED:
+Before doing anything:
+1. Read AGENTS.md
+2. Read WORKSPACE.md
+3. Read ai-ops-registry/docs/READ_FIRST_POLICY.md
+4. Read the relevant task card
+5. Read the active-context snapshot
+6. Read required workspace skill if relevant
+7. Use Serena for workspace/file understanding when useful
+8. Use CodeGraph for impact/dependency review when useful
+
+Worker must not:
+- edit files outside allowed scope
+- touch external product repositories unless explicitly allowed
+- skip READ-FIRST
+- bypass owner gate
+- claim tool readiness without verifying actual tool output
+
 Scope:
 - Use only the registry-approved context.
 - Do not modify product files.
@@ -348,10 +409,12 @@ Required runtimes: ${snapshot.active_context.required_runtimes.join(", ")}
 
 Task ID: ${taskId}
 Verify:
-- Registry boundary stayed intact.
-- No files under D:\\\\lumina-studio changed.
-- The active-context snapshot is referenced.
-- The task remained manual-safe.
+- READ-FIRST was followed
+- workspace skill was used if relevant
+- Serena/CodeGraph were used or intentionally skipped with reason
+- task stayed within allowed files
+- product boundary stayed intact
+- manual-safe policy stayed intact
 `;
   
   const dispatchDir = path.join(reportsDir, taskId, "dispatch");
