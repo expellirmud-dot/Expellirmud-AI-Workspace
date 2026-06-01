@@ -1,5 +1,51 @@
 import React, { useEffect, useState } from "react";
 
+const WORKER_POOL = [
+  {
+    id: "chatgpt_55",
+    label: "ChatGPT 5.5",
+    description: "Controller / Final Gate / hard reasoning only",
+    runnable: false
+  },
+  {
+    id: "codex",
+    label: "Codex CLI",
+    description: "Main local orchestrator",
+    runnable: true,
+    patterns: ["codex", "codex exec \"<prompt>\""]
+  },
+  {
+    id: "agy",
+    label: "agy",
+    description: "Antigravity CLI worker",
+    runnable: true,
+    patterns: ["agy --add-dir \"D:\\ai-tools\\AI-Workspace\" --print \"<prompt>\""]
+  },
+  {
+    id: "gemini",
+    label: "Gemini CLI",
+    description: "Evidence-only checker",
+    runnable: true,
+    patterns: ["gemini -p \"<evidence-only prompt>\""]
+  },
+  {
+    id: "opencode",
+    label: "OpenCode CLI",
+    description: "Fast checker / patch-review worker",
+    runnable: true,
+    patterns: ["opencode run \"<prompt>\""]
+  },
+  {
+    id: "aider",
+    label: "Aider",
+    description: "Optional patch-only terminal worker",
+    runnable: true,
+    patterns: ["aider <allowed files only>"]
+  }
+];
+
+const RUNNABLE_WORKERS = WORKER_POOL.filter((worker) => worker.runnable);
+
 async function apiCall(url, method = "GET", body = null) {
   const options = { method };
   if (body) {
@@ -35,6 +81,9 @@ export default function App() {
   
   const [activeTab, setActiveTab] = useState("commandCenter");
   const [selectedTaskId, setSelectedTaskId] = useState("");
+  const [selectedCliWorker, setSelectedCliWorker] = useState("codex");
+  const [codexCommandMode, setCodexCommandMode] = useState("interactive");
+  const [cliCommandText, setCliCommandText] = useState("");
   
   // New Task Form
   const [newObjective, setNewObjective] = useState("");
@@ -209,6 +258,66 @@ export default function App() {
       await loadTaskFiles();
     } catch (err) {
       setError(String(err.message));
+    }
+  }
+
+  function buildCliWorkerCommand(workerId, task) {
+    const objective = (task?.task?.objective || "Workspace task").replace(/\r?\n+/g, " ").trim();
+    const taskId = task?.task?.id || selectedTaskId || "TASK-ID";
+    const prompt = [
+      `task_id: ${taskId}`,
+      `objective: ${objective}`,
+      `manual_safe: true`,
+      `do_not_auto_run: true`,
+      `generate_command_only: true`,
+    ].join("\n");
+
+    const escapedPrompt = prompt.replace(/"/g, '\\"');
+    const allowedFiles = Array.isArray(task?.task?.allowed_files) ? task.task.allowed_files : [];
+
+    if (workerId === "codex") {
+      return codexCommandMode === "exec"
+        ? `codex exec "${escapedPrompt}"`
+        : "codex";
+    }
+    if (workerId === "agy") {
+      return `agy --add-dir "D:\\ai-tools\\AI-Workspace" --print "${escapedPrompt}"`;
+    }
+    if (workerId === "gemini") {
+      return `gemini -p "<evidence-only prompt>"`;
+    }
+    if (workerId === "opencode") {
+      return `opencode run "${escapedPrompt}"`;
+    }
+    if (workerId === "aider") {
+      if (!allowedFiles.length) {
+        return "# Aider is manual/guarded. Provide explicit allowed_files in the task card before generating a real command.\naider <allowed files only>";
+      }
+      return [
+        "# Aider is manual/guarded. Use only with explicit allowed_files and owner approval.",
+        `# Allowed files from task card: ${allowedFiles.join(", ")}`,
+        `aider <allowed files only>`
+      ].join("\n");
+    }
+    return `# Unsupported CLI worker: ${workerId}`;
+  }
+
+  async function handleGenerateCliCommand() {
+    const worker = WORKER_POOL.find((item) => item.id === selectedCliWorker);
+    if (!worker || !worker.runnable) return setError("Select a runnable CLI worker first.");
+    if (!activeTask) return setError("Select a task first.");
+    const command = buildCliWorkerCommand(worker.id, activeTask);
+    setCliCommandText(command);
+    setStatus(`Generated command for ${worker.label}.`);
+    try {
+      await apiCall("/api/task/log-event", "POST", {
+        taskId: selectedTaskId,
+        logType: "system",
+        message: `Generated command-only prompt for ${worker.id}.`
+      });
+      await loadTaskFiles();
+    } catch (err) {
+      console.error(err);
     }
   }
 
@@ -420,6 +529,81 @@ export default function App() {
                        )}
                     </div>
                   ))}
+                </Card>
+
+                <Card title="Worker Pool">
+                  <p className="muted mb-4">Manual-safe command generation only. No auto-run, no dispatch automation, no browser control.</p>
+                  <div className="stack-small mb-4">
+                    {WORKER_POOL.map((worker) => (
+                      <div key={worker.id} className={`worker-pill ${worker.runnable ? "worker-pill-runnable" : "worker-pill-info"}`}>
+                        <b>{worker.label}:</b> {worker.description}
+                        {!worker.runnable && <span className="worker-pill-note">Informational only</span>}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="guardrail-box mb-4">
+                    <b>Guardrails</b>
+                    <ul className="muted guardrail-list">
+                      <li>READ-FIRST required</li>
+                      <li>Serena required</li>
+                      <li>CodeGraph required</li>
+                      <li>no D:\\lumina-studio</li>
+                      <li>no external product repo edits</li>
+                      <li>no commit/push without approval</li>
+                      <li>one worker call at a time</li>
+                      <li>no auto-run</li>
+                      <li>Aider requires explicit allowed_files</li>
+                    </ul>
+                  </div>
+                  <div className="form-group">
+                    <label>CLI Worker Channel</label>
+                    <select value={selectedCliWorker} onChange={e => setSelectedCliWorker(e.target.value)}>
+                      {RUNNABLE_WORKERS.map((worker) => (
+                        <option key={worker.id} value={worker.id}>
+                          {worker.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {selectedCliWorker === "codex" && (
+                    <div className="form-group">
+                      <label>Codex Command Mode</label>
+                      <select value={codexCommandMode} onChange={e => setCodexCommandMode(e.target.value)}>
+                        <option value="interactive">codex</option>
+                        <option value="exec">codex exec "&lt;prompt&gt;"</option>
+                      </select>
+                    </div>
+                  )}
+                  {selectedCliWorker === "aider" && (
+                    <div className="guardrail-box mb-4">
+                      <b>Aider Safety Note</b>
+                      <div className="muted">
+                        Aider can edit files. Use only for explicit patch-only tasks with allowed_files and owner approval.
+                      </div>
+                    </div>
+                  )}
+                  <div className="buttonRow mb-4">
+                    <button onClick={handleGenerateCliCommand} disabled={!selectedTaskId}>Generate Command</button>
+                    <button
+                      onClick={() => cliCommandText && copy(cliCommandText, () => setStatus("Copied CLI command."))}
+                      disabled={!cliCommandText}
+                      className="btn-secondary"
+                    >
+                      Copy Command
+                    </button>
+                  </div>
+                  <pre>{cliCommandText || "Select a task and generate a command."}</pre>
+                  <div className="mt-4">
+                    <b>Command patterns</b>
+                    <ul className="muted guardrail-list">
+                      <li><code>codex</code></li>
+                      <li><code>codex exec &quot;&lt;prompt&gt;&quot;</code></li>
+                      <li><code>agy --add-dir &quot;D:\ai-tools\AI-Workspace&quot; --print &quot;&lt;prompt&gt;&quot;</code></li>
+                      <li><code>gemini -p &quot;&lt;evidence-only prompt&gt;&quot;</code></li>
+                      <li><code>opencode run &quot;&lt;prompt&gt;&quot;</code></li>
+                      <li><code>aider &lt;allowed files only&gt;</code></li>
+                    </ul>
+                  </div>
                 </Card>
 
                 <div className="stack">
