@@ -238,6 +238,7 @@ function buildSnapshot(projectSlug, objective) {
       immutable_after_dispatch: true,
       project: {
         id: profile.project.id,
+        name: profile.project.name,
         profile_version: profile.project.profile_version,
         path: profile.project.path,
       },
@@ -251,13 +252,34 @@ function buildSnapshot(projectSlug, objective) {
       required_skills: profile.skills?.skills || [],
       required_tools: profile.project.required_tools || [],
       required_runtimes: profile.project.required_runtimes || [],
-      allowed_files: [
-        `${profile.project.path}\\AGENTS.md`,
-        `${profile.project.path}\\PROJECT_RULES.md`,
-        `${profile.project.path}\\AI_HANDOFF.md`,
-        `${profile.project.path}\\reports\\*.md`,
-      ],
-      forbidden_files: [`${profile.project.path}\\**`],
+      allowed_files: profile.slug === 'expellirmud-ai-workspace' 
+        ? [
+            `${profile.project.path}\\AGENTS.md`,
+            `${profile.project.path}\\WORKSPACE.md`,
+            `${profile.project.path}\\workspace-modules.yaml`,
+            `${profile.project.path}\\ai-ops-registry\\AGENTS.md`,
+            `${profile.project.path}\\ai-ops-registry\\docs\\READ_FIRST_POLICY.md`,
+            `${profile.project.path}\\ai-ops-registry\\docs\\WORKSPACE_GOVERNANCE.md`,
+            `${profile.project.path}\\ai-ops-registry\\docs\\TOOL_PREFLIGHT.md`,
+            `${profile.project.path}\\ai-ops-registry\\registry\\channels.yaml`,
+            `${profile.project.path}\\ai-ops-registry\\registry\\automation-policy.yaml`,
+            `${profile.project.path}\\skills\\AI_WORKSPACE_BOOTSTRAP\\skill.md`,
+            `${profile.project.path}\\skills\\AI_WORKSPACE_READ_FIRST\\skill.md`,
+            `${profile.project.path}\\skills\\AI_WORKSPACE_DISPATCH_GOVERNANCE\\skill.md`,
+            `${profile.project.path}\\skills\\AI_WORKSPACE_REGISTRY_GOVERNANCE\\skill.md`,
+            `${profile.project.path}\\skills\\AI_WORKSPACE_DASHBOARD_UI\\skill.md`,
+            `${profile.project.path}\\skills\\AI_WORKSPACE_REPORTING\\skill.md`,
+            `${profile.project.path}\\reports\\*.md`,
+          ]
+        : [
+            `${profile.project.path}\\AGENTS.md`,
+            `${profile.project.path}\\PROJECT_RULES.md`,
+            `${profile.project.path}\\AI_HANDOFF.md`,
+            `${profile.project.path}\\reports\\*.md`,
+          ],
+      forbidden_files: profile.slug === 'expellirmud-ai-workspace'
+        ? ['D:\\lumina-studio\\**']
+        : [`${profile.project.path}\\**`],
       validation_commands: [
         "git status --short",
         "python -c \"import yaml, pathlib; yaml.safe_load(pathlib.Path(r'D:\\ai-tools\\AI-Workspace\\ai-ops-registry\\projects\\lumina-studio\\project.yaml').read_text(encoding='utf-8')); print('PROJECT_YAML_OK')\"",
@@ -306,12 +328,24 @@ function buildTaskCard(snapshot, objective, title, channels) {
       forbidden_files: snapshot.active_context.forbidden_files,
       allowed_actions: ["read", "inspect", "prepare-manual-dispatch"],
       forbidden_actions: ["edit-product-code", "auto-send", "use-playwright-bridge", "subagent-automation", "ci", "deployment"],
-      read_first: [
-        "D:\\ai-tools\\AI-Workspace\\AGENTS.md",
-        "D:\\ai-tools\\AI-Workspace\\WORKSPACE.md",
-        "D:\\ai-tools\\AI-Workspace\\workspace-modules.yaml",
-        "D:\\ai-tools\\AI-Workspace\\ai-ops-registry\\registry\\REGISTRY_CONTRACT.md",
-      ],
+      operation_mode: snapshot.active_context.project.id === 'expellirmud-ai-workspace' ? 'read_only_verification' : 'standard',
+      read_first: snapshot.active_context.project.id === 'expellirmud-ai-workspace'
+        ? [
+            "D:\\ai-tools\\AI-Workspace\\AGENTS.md",
+            "D:\\ai-tools\\AI-Workspace\\WORKSPACE.md",
+            "D:\\ai-tools\\AI-Workspace\\workspace-modules.yaml",
+            "D:\\ai-tools\\AI-Workspace\\ai-ops-registry\\AGENTS.md",
+            "D:\\ai-tools\\AI-Workspace\\ai-ops-registry\\docs\\READ_FIRST_POLICY.md",
+            "D:\\ai-tools\\AI-Workspace\\ai-ops-registry\\docs\\WORKSPACE_GOVERNANCE.md",
+            "D:\\ai-tools\\AI-Workspace\\ai-ops-registry\\docs\\TOOL_PREFLIGHT.md",
+            "D:\\ai-tools\\AI-Workspace\\ai-ops-registry\\registry\\REGISTRY_CONTRACT.md",
+          ]
+        : [
+            "D:\\ai-tools\\AI-Workspace\\AGENTS.md",
+            "D:\\ai-tools\\AI-Workspace\\WORKSPACE.md",
+            "D:\\ai-tools\\AI-Workspace\\workspace-modules.yaml",
+            "D:\\ai-tools\\AI-Workspace\\ai-ops-registry\\registry\\REGISTRY_CONTRACT.md",
+          ],
       validation_commands: snapshot.active_context.validation_commands,
       outputs: ["worker-report", "verifier-report", "manual-dispatch-message"],
       handoff: { next_role: "verifier", automatic_dispatch: false, owner_approval_required: true },
@@ -342,7 +376,7 @@ function buildDispatchMessages(snapshot, objective, taskId, channels = {}) {
   const workerId = channels.worker || "not_assigned";
   const verifierId = channels.verifier || "not_assigned";
 
-  const controller = `You are the Controller for LUMINA.
+  const controller = `You are the Controller for ${snapshot.active_context.project.name}.
 
 Governance Readiness:
 - READ-FIRST Policy: Present
@@ -375,7 +409,7 @@ rules:
 
 required_output_format: controller_response_v1
 `;
-  const worker = `You are the Worker for LUMINA.
+  const worker = `You are the Worker for ${snapshot.active_context.project.name}.
 
 role: worker
 task_id: ${taskId}
@@ -423,7 +457,11 @@ Before doing anything:
 3. Read ai-ops-registry/docs/READ_FIRST_POLICY.md
 4. Read the relevant task card
 5. Read the active-context snapshot
-6. Read required workspace skill if relevant
+6. Provide skill verification evidence in the following table format:
+
+| Skill Path | Exists | Readable | Format Header Present | Required Sections Present | Evidence / Notes |
+|---|---|---|---|---|---|
+
 7. Use Serena for workspace/file understanding when useful
 8. Use CodeGraph for impact/dependency review when useful
 
@@ -434,16 +472,19 @@ Worker must not:
 - bypass owner gate
 - claim tool readiness without verifying actual tool output
 `;
-  const verifier = `You are the Verifier for LUMINA.
+  const verifier = `You are the Verifier for ${snapshot.active_context.project.name}.
 
 Task ID: ${taskId}
 Verify:
-- READ-FIRST was followed
-- workspace skill was used if relevant
+- READ-FIRST was followed (Check both task.read_first and snapshot.read_first_sources)
+- workspace skill was used if relevant (Verify evidence table provided by Worker)
 - Serena/CodeGraph were used or intentionally skipped with reason
-- task stayed within allowed files
-- product boundary stayed intact
+- task stayed within allowed files (Distinguish between READ-FIRST governance reads and product repo reads)
+- product boundary stayed intact (External product repos must remain untouched)
 - manual-safe policy stayed intact
+
+Boundary Verification Note:
+Do not mark required READ-FIRST governance reads as violations if they are listed in allowed_files or read_first_sources.
 `;
   
   const dispatchDir = path.join(reportsDir, taskId, "dispatch");
