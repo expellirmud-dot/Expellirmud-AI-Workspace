@@ -37,11 +37,11 @@ function validateTaskId(taskId) {
   return taskId;
 }
 
-function generateSafeTimestampFilename(prefix) {
+function generateSafeTimestampFilename(prefix, extension = "md") {
   const iso = new Date().toISOString();
   const safeIso = iso.replace(/[:.]/g, "-");
   const suffix = crypto.randomBytes(4).toString('hex');
-  return `${prefix}-${safeIso}-${suffix}.md`;
+  return `${prefix}-${safeIso}-${suffix}.${extension}`;
 }
 
 function writeAppendOnlyArtifact(relPath, content) {
@@ -87,6 +87,18 @@ function writeText(filePath, text) {
 function appendText(filePath, text) {
   ensureDir(path.dirname(filePath));
   fs.appendFileSync(filePath, text, "utf8");
+}
+
+function readLatestArtifact(relDir, prefix, parser = (text) => text) {
+  const absDir = checkSafePath(relDir);
+  if (!fs.existsSync(absDir)) return null;
+  const files = fs.readdirSync(absDir).filter((file) => file.startsWith(prefix)).sort();
+  if (files.length === 0) return null;
+  const filename = files[files.length - 1];
+  return {
+    filename,
+    content: parser(readText(path.join(absDir, filename)))
+  };
 }
 
 function isoNow() {
@@ -298,6 +310,91 @@ function logEvent(taskId, logType, message) {
   validateTaskId(taskId);
   const logPath = checkSafePath(path.join("reports", taskId, "logs", `${logType}.log.md`));
   appendText(logPath, `[${isoNow()}] ${message}\n`);
+}
+
+function buildCodexHandoff(task, taskFilePath) {
+  const taskId = task.task.id;
+  const taskCardPath = path.relative(rootDir, taskFilePath);
+  const snapshotPath = task.task.active_context_snapshot;
+  return `# Codex Local Orchestration Handoff
+
+contract: codex_orchestration_handoff_v1
+task_id: ${taskId}
+task_card: ${taskCardPath}
+active_context_snapshot: ai-ops-registry/${snapshotPath}
+mode: manual-safe
+
+## Required Preflight
+- READ-FIRST required
+- Read and use workspace skills from D:\\ai-tools\\AI-Workspace\\skills
+- Use Serena for workspace understanding
+- Use CodeGraph for dependency / impact review
+- Stay within task.allowed_files
+- Respect task.forbidden_files
+- Do not touch external product repositories unless explicitly allowed
+- Do not commit, push, or deploy without owner approval
+- Invoke at most one CLI worker at a time
+- Keep every worker command and validation result auditable
+
+## Objective
+${task.task.objective}
+
+## Allowed Files
+${task.task.allowed_files.map((file) => `- ${file}`).join("\n")}
+
+## Forbidden Files
+${task.task.forbidden_files.map((file) => `- ${file}`).join("\n")}
+
+## Completion Contract
+When local validation is complete, POST an orchestrator_report_v1 JSON payload to:
+http://127.0.0.1:5173/api/task/orchestrator-report
+
+Required fields:
+- taskId
+- schemaVersion: orchestrator_report_v1
+- summary
+- diffSummary
+- validationResults
+- workersCalled
+- blockers
+
+Dashboard execution boundary:
+- This handoff does not auto-run Codex or any worker.
+- This handoff does not auto-send data to ChatGPT Web.
+- Owner approval remains required before commit or push.
+`;
+}
+
+function buildFinalGateSummary(taskId, report) {
+  const validationLines = Object.entries(report.validationResults)
+    .map(([name, result]) => `- ${name}: ${String(result)}`)
+    .join("\n") || "- none reported";
+  const workerLines = report.workersCalled.map((worker) => `- ${worker}`).join("\n") || "- none";
+  const blockerLines = report.blockers.map((blocker) => `- ${blocker}`).join("\n") || "- none";
+  return `# ChatGPT Web Final Gate Summary
+
+task_id: ${taskId}
+schema_version: orchestrator_report_v1
+status: READY_FOR_FINAL_GATE
+
+## Orchestrator Summary
+${report.summary}
+
+## Diff Summary
+${report.diffSummary}
+
+## Validation Results
+${validationLines}
+
+## Workers Called
+${workerLines}
+
+## Blockers
+${blockerLines}
+
+## Final Gate Request
+Review the evidence and return APPROVED or REJECTED with a concise reason.
+`;
 }
 
 function buildSnapshot(projectSlug, objective) {
@@ -782,6 +879,54 @@ export default defineConfig({
           }
         });
 
+        server.middlewares.use("/api/task/start-codex-orchestration", async (req, res) => {
+          if (req.method !== "POST") return res.end();
+          try {
+            const { taskId } = await jsonBody(req);
+            validateTaskId(taskId);
+            const taskFile = findTaskFile(taskId);
+            if (!taskFile) {
+              res.statusCode = 404;
+              return res.end(JSON.stringify({ error: "Task not found" }));
+            }
+
+            const t = readYaml(taskFile.path);
+            const oldStatus = normalizeStatus(t.task.status);
+            validateTransition(oldStatus, 'CODEX_ORCHESTRATING');
+            if (!Array.isArray(t.task.allowed_files) || t.task.allowed_files.length === 0) {
+              res.statusCode = 409;
+              return res.end(JSON.stringify({ error: "Cannot start Codex orchestration: missing allowed_files scope" }));
+            }
+            if (!Array.isArray(t.task.forbidden_files)) {
+              res.statusCode = 409;
+              return res.end(JSON.stringify({ error: "Cannot start Codex orchestration: missing forbidden_files scope" }));
+            }
+            if (!t.task.active_context_snapshot) {
+              res.statusCode = 409;
+              return res.end(JSON.stringify({ error: "Cannot start Codex orchestration: missing active context snapshot" }));
+            }
+            checkSafePath(t.task.active_context_snapshot);
+
+            const newPath = path.join(tasksActiveDir, `${taskId}.yaml`);
+            const handoff = buildCodexHandoff(t, newPath);
+            const filename = generateSafeTimestampFilename('codex-handoff');
+            writeAppendOnlyArtifact(path.join("reports", taskId, "handoffs", filename), handoff);
+
+            t.task.status = 'CODEX_ORCHESTRATING';
+            if (taskFile.path !== newPath) fs.unlinkSync(taskFile.path);
+            writeYaml(newPath, t);
+            logEvent(taskId, 'task', `Status changed from ${oldStatus} to CODEX_ORCHESTRATING via governed Codex handoff.`);
+            logEvent(taskId, 'system', `Generated append-only Codex orchestration handoff: handoffs/${filename}`);
+
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ success: true, handoff, filename, task: t }));
+          } catch (e) {
+            res.statusCode = e.status_code || 409;
+            if (e.message.includes('Path boundary') || e.message.includes('Invalid taskId')) res.statusCode = 400;
+            res.end(JSON.stringify({ error: e.message }));
+          }
+        });
+
         server.middlewares.use("/api/task/log-event", async (req, res) => {
           if (req.method !== "POST") return res.end();
           try {
@@ -892,6 +1037,12 @@ export default defineConfig({
              const dispatchDir = checkSafePath(path.join("reports", taskId, "dispatch"));
              const responsesDir = checkSafePath(path.join("reports", taskId, "responses"));
              const decisionsDir = checkSafePath(path.join("reports", taskId, "decisions"));
+             const codexHandoff = readLatestArtifact(path.join("reports", taskId, "handoffs"), 'codex-handoff-');
+             const orchestratorReport = readLatestArtifact(
+               path.join("reports", taskId, "reports"),
+               'orchestrator-report-',
+               (text) => JSON.parse(text)
+             );
              res.setHeader("Content-Type", "application/json");
              res.end(JSON.stringify({
                 dispatch: {
@@ -905,7 +1056,10 @@ export default defineConfig({
                    verifier: readText(path.join(responsesDir, "verifier-response.md")),
                    final: readText(path.join(responsesDir, "final-review.md"))
                 },
-                decisions: fs.existsSync(decisionsDir) ? fs.readdirSync(decisionsDir).map(f => readText(path.join(decisionsDir, f))) : []
+                decisions: fs.existsSync(decisionsDir) ? fs.readdirSync(decisionsDir).map(f => readText(path.join(decisionsDir, f))) : [],
+                codexHandoff,
+                orchestratorReport,
+                finalGateSummary: orchestratorReport ? buildFinalGateSummary(taskId, orchestratorReport.content) : ""
              }));
            } catch (e) {
              res.statusCode = 400;
@@ -964,6 +1118,77 @@ Decision: ${decision}
             res.end(JSON.stringify({ success: true }));
           } catch (e) {
             res.statusCode = 400;
+            res.end(JSON.stringify({ error: e.message }));
+          }
+        });
+
+        server.middlewares.use("/api/task/orchestrator-report", async (req, res) => {
+          if (req.method !== "POST") return res.end();
+          try {
+            const body = await jsonBody(req);
+            const taskId = validateTaskId(body.taskId);
+            const taskFile = findTaskFile(taskId);
+            if (!taskFile) {
+              res.statusCode = 404;
+              return res.end(JSON.stringify({ error: "Task not found" }));
+            }
+            if (body.schemaVersion !== 'orchestrator_report_v1') {
+              res.statusCode = 400;
+              return res.end(JSON.stringify({ error: "schemaVersion must be orchestrator_report_v1" }));
+            }
+            if (!body.summary || typeof body.summary !== 'string') {
+              res.statusCode = 400;
+              return res.end(JSON.stringify({ error: "summary is required" }));
+            }
+            if (!body.diffSummary || typeof body.diffSummary !== 'string') {
+              res.statusCode = 400;
+              return res.end(JSON.stringify({ error: "diffSummary is required" }));
+            }
+            if (!body.validationResults || typeof body.validationResults !== 'object' || Array.isArray(body.validationResults)) {
+              res.statusCode = 400;
+              return res.end(JSON.stringify({ error: "validationResults object is required" }));
+            }
+            if (!Array.isArray(body.workersCalled) || !body.workersCalled.every((worker) => typeof worker === 'string')) {
+              res.statusCode = 400;
+              return res.end(JSON.stringify({ error: "workersCalled must be a string array" }));
+            }
+            if (!Array.isArray(body.blockers) || !body.blockers.every((blocker) => typeof blocker === 'string')) {
+              res.statusCode = 400;
+              return res.end(JSON.stringify({ error: "blockers must be a string array" }));
+            }
+
+            const t = readYaml(taskFile.path);
+            const oldStatus = normalizeStatus(t.task.status);
+            validateTransition(oldStatus, 'ORCHESTRATOR_REPORTED');
+            validateTransition('ORCHESTRATOR_REPORTED', 'READY_FOR_FINAL_GATE');
+
+            const report = {
+              schemaVersion: 'orchestrator_report_v1',
+              taskId,
+              receivedAt: new Date().toISOString(),
+              summary: body.summary,
+              diffSummary: body.diffSummary,
+              validationResults: body.validationResults,
+              workersCalled: body.workersCalled,
+              blockers: body.blockers
+            };
+            const filename = generateSafeTimestampFilename('orchestrator-report', 'json');
+            writeAppendOnlyArtifact(path.join("reports", taskId, "reports", filename), JSON.stringify(report, null, 2) + "\n");
+
+            t.task.status = 'READY_FOR_FINAL_GATE';
+            const newPath = path.join(tasksActiveDir, `${taskId}.yaml`);
+            if (taskFile.path !== newPath) fs.unlinkSync(taskFile.path);
+            writeYaml(newPath, t);
+            logEvent(taskId, 'report', `Received orchestrator_report_v1: reports/${filename}`);
+            logEvent(taskId, 'task', `Status changed from ${oldStatus} to ORCHESTRATOR_REPORTED via orchestrator_report_v1.`);
+            logEvent(taskId, 'task', `Status changed from ORCHESTRATOR_REPORTED to READY_FOR_FINAL_GATE via orchestrator_report_v1.`);
+
+            const finalGateSummary = buildFinalGateSummary(taskId, report);
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ success: true, filename, report, finalGateSummary, task: t }));
+          } catch (e) {
+            res.statusCode = e.status_code || 409;
+            if (e.message.includes('Path boundary') || e.message.includes('Invalid taskId')) res.statusCode = 400;
             res.end(JSON.stringify({ error: e.message }));
           }
         });
@@ -1038,7 +1263,7 @@ Status: ${status}
             const entries = [];
 
             if (fs.existsSync(taskDir)) {
-               ['decisions', 'reports', 'reviews', 'logs'].forEach(dirName => {
+               ['handoffs', 'decisions', 'reports', 'reviews', 'logs'].forEach(dirName => {
                   const subDir = path.join(taskDir, dirName);
                   if (fs.existsSync(subDir)) {
                      fs.readdirSync(subDir).forEach(f => {

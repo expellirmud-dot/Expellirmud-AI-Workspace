@@ -110,7 +110,7 @@ export default function App() {
   const [selVerifier, setSelVerifier] = useState("");
 
   // Data
-  const [taskFiles, setTaskFiles] = useState({ dispatch: {}, responses: {}, decisions: [] });
+  const [taskFiles, setTaskFiles] = useState({ dispatch: {}, responses: {}, decisions: [], codexHandoff: null, orchestratorReport: null, finalGateSummary: "" });
   const [taskLogs, setTaskLogs] = useState({});
   const [taskTimeline, setTaskTimeline] = useState([]);
 
@@ -201,6 +201,20 @@ export default function App() {
     } catch (err) {
       setError(String(err.message));
       setStatus("Transition failed");
+    }
+  }
+
+  async function handleStartCodexOrchestration() {
+    setError("");
+    setStatus("Generating governed Codex orchestration handoff...");
+    try {
+      await apiCall("/api/task/start-codex-orchestration", "POST", { taskId: selectedTaskId });
+      setStatus("Codex handoff generated. Copy it into Codex App to continue local orchestration.");
+      await loadData();
+      await loadTaskFiles();
+    } catch (err) {
+      setError(String(err.message));
+      setStatus("Codex orchestration start failed");
     }
   }
 
@@ -614,7 +628,7 @@ export default function App() {
                 <div className="mt-4">
                    <h4>Lifecycle Controls</h4>
                    <div className="buttonRow mt-2">
-                     <button onClick={() => handleTransition("CODEX_ORCHESTRATING")} disabled={isDone || currentStatus !== "READY_TO_START"}>Start Codex Orchestration</button>
+                     <button onClick={handleStartCodexOrchestration} disabled={isDone || currentStatus !== "READY_TO_START"}>Start Codex Orchestration</button>
                      <button onClick={() => handleTransition("WORKER_RUNNING")} disabled={isDone || currentStatus !== "CODEX_ORCHESTRATING"}>Record Worker Running</button>
                      <button onClick={() => handleTransition("VALIDATING")} disabled={isDone || currentStatus !== "WORKER_RUNNING"}>Start Validation</button>
                      <button onClick={() => handleTransition("READY_FOR_FINAL_GATE")} disabled={isDone || currentStatus !== "ORCHESTRATOR_REPORTED"}>Send To Final Gate</button>
@@ -635,6 +649,23 @@ export default function App() {
                    )}
                 </div>
               </Card>
+
+              {taskFiles.codexHandoff && (
+                <Card title="Codex Local Orchestration Handoff">
+                  <p className="muted mb-4">
+                    Manual-safe package only. Copy this handoff into Codex App. Dashboard does not auto-run Codex or any CLI worker.
+                  </p>
+                  <div className="buttonRow mb-4">
+                    <button
+                      onClick={() => copy(taskFiles.codexHandoff.content, () => setStatus("Copied governed Codex handoff."))}
+                      className="btn-secondary"
+                    >
+                      Copy Codex Handoff
+                    </button>
+                  </div>
+                  <pre>{taskFiles.codexHandoff.content}</pre>
+                </Card>
+              )}
 
               <div className="grid">
                 <Card title="Controller Decision Gate">
@@ -823,6 +854,52 @@ export default function App() {
                   </Card>
                 </div>
               </div>
+
+              {taskFiles.orchestratorReport && (
+                <Card title="Orchestrator Report v1">
+                  <p className="muted mb-4">
+                    Structured local evidence received directly from Codex. External ChatGPT Web delivery remains manual-safe.
+                  </p>
+                  <div className="stack-small">
+                    <div><b>Summary:</b> {taskFiles.orchestratorReport.content.summary}</div>
+                    <div><b>Diff Summary:</b> {taskFiles.orchestratorReport.content.diffSummary}</div>
+                    <div>
+                      <b>Validation Results:</b>
+                      <ul className="guardrail-list">
+                        {Object.entries(taskFiles.orchestratorReport.content.validationResults).map(([name, result]) => (
+                          <li key={name}>{name}: {String(result)}</li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div>
+                      <b>Workers Called:</b>
+                      <ul className="guardrail-list">
+                        {taskFiles.orchestratorReport.content.workersCalled.length > 0
+                          ? taskFiles.orchestratorReport.content.workersCalled.map((worker) => <li key={worker}>{worker}</li>)
+                          : <li>none</li>}
+                      </ul>
+                    </div>
+                    <div>
+                      <b>Blockers:</b>
+                      <ul className="guardrail-list">
+                        {taskFiles.orchestratorReport.content.blockers.length > 0
+                          ? taskFiles.orchestratorReport.content.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)
+                          : <li>none</li>}
+                      </ul>
+                    </div>
+                  </div>
+                  <div className="buttonRow mt-4">
+                    <button
+                      onClick={() => copy(taskFiles.finalGateSummary, () => setStatus("Copied ChatGPT Web Final Gate summary."))}
+                      disabled={!taskFiles.finalGateSummary}
+                      className="btn-secondary"
+                    >
+                      Copy ChatGPT Web Final Gate Summary
+                    </button>
+                  </div>
+                  <pre className="mt-4">{taskFiles.finalGateSummary}</pre>
+                </Card>
+              )}
 
               <Card title="Lifecycle Timeline">
                  {taskTimeline.length === 0 ? (
