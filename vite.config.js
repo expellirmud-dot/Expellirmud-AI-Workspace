@@ -1313,6 +1313,92 @@ Status: ${status}
           }
         });
 
+        server.middlewares.use("/api/task/expose", async (req, res) => {
+          if (req.method !== "POST") return res.end();
+          try {
+            const { taskId, expose } = await jsonBody(req);
+            validateTaskId(taskId);
+            const taskFile = findTaskFile(taskId);
+            if (!taskFile) {
+               res.statusCode = 404;
+               return res.end(JSON.stringify({ error: "Task not found" }));
+            }
+            const t = readYaml(taskFile.path);
+            t.task.connector_exposed = !!expose;
+            writeYaml(taskFile.path, t);
+            logEvent(taskId, 'task', `Connector expose flag set to ${!!expose}`);
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ success: true, exposed: !!expose }));
+          } catch (e) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: e.message }));
+          }
+        });
+
+        server.middlewares.use("/api/task/final-gate-package", async (req, res) => {
+          if (req.method !== "GET") return res.end();
+          try {
+            const authHeader = req.headers.authorization;
+            const expectedToken = process.env.CHATGPT_CONNECTOR_TOKEN;
+            if (!expectedToken) {
+               res.statusCode = 503;
+               return res.end(JSON.stringify({ error: "Connector token not configured" }));
+            }
+            if (authHeader !== `Bearer ${expectedToken}`) {
+               res.statusCode = 401;
+               return res.end(JSON.stringify({ error: "Unauthorized" }));
+            }
+
+            const taskId = req.url.split('?')[0].replace(/^\//, '');
+            validateTaskId(taskId);
+
+            const taskFile = findTaskFile(taskId);
+            if (!taskFile) {
+               res.statusCode = 404;
+               return res.end(JSON.stringify({ error: "Task not found" }));
+            }
+
+            const t = readYaml(taskFile.path);
+            if (!t.task.connector_exposed) {
+               res.statusCode = 403;
+               return res.end(JSON.stringify({ error: "Task is not exposed to connector" }));
+            }
+
+            let orchestratorReport = null;
+            const reportsDir = checkSafePath(path.join("reports", taskId, "reports"));
+            if (fs.existsSync(reportsDir)) {
+               const files = fs.readdirSync(reportsDir).sort().reverse();
+               const reportFile = files.find(f => f.startsWith('orchestrator-report') && f.endsWith('.json'));
+               if (reportFile) {
+                  const content = readText(path.join(reportsDir, reportFile));
+                  try {
+                    orchestratorReport = JSON.parse(content);
+                  } catch (err) {}
+               }
+            }
+
+            const payload = {
+               task_id: taskId,
+               schema_version: "orchestrator_report_v1",
+               status: t.task.status,
+               orchestrator_summary: orchestratorReport?.summary || "",
+               diff_summary: orchestratorReport?.diffSummary || "",
+               validation_results: orchestratorReport?.validationResults || {},
+               workers_called: orchestratorReport?.workersCalled || [],
+               blockers: orchestratorReport?.blockers || [],
+               changed_files: [],
+               commit_hash: "",
+               final_gate_request: true
+            };
+
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify(payload));
+          } catch (e) {
+            res.statusCode = e.status_code || 400;
+            res.end(JSON.stringify({ error: e.message }));
+          }
+        });
+
       }
     }
   ],

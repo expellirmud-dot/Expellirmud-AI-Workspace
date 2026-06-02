@@ -872,7 +872,23 @@ export default function App() {
                     <div><b>Auto-send:</b> Disabled</div>
                     <div><b>Browser automation:</b> Forbidden</div>
                     <div><b>Reason:</b> {connectorReadiness.reason}</div>
-                    <div className="mt-4">
+                    <div className="mt-4 stack-small">
+                      <div><b>Connector Expose Status:</b> {activeTask?.task?.connector_exposed ? <span className="badge badge-ready" style={{background: '#dcfce7', color: '#166534'}}>EXPOSED</span> : <span className="badge badge-needs_config">NOT EXPOSED</span>}</div>
+                      <button
+                        className="btn-secondary"
+                        disabled={!selectedTaskId}
+                        onClick={async () => {
+                           try {
+                             await apiCall("/api/task/expose", "POST", { taskId: selectedTaskId, expose: true });
+                             await loadData();
+                             await loadTaskFiles();
+                           } catch (e) {
+                             console.error("Failed to expose task", e);
+                           }
+                        }}
+                      >
+                        Expose Task to Custom GPT Connector
+                      </button>
                       <button className="btn-secondary" disabled>Send via MCP/API — Requires Phase 2B Approval</button>
                     </div>
                   </div>
