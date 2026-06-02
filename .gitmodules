@@ -1,0 +1,3 @@
+[submodule "ai-ops-registry"]
+    path = ai-ops-registry
+    url = https://github.com/expellirmud-dot/ai-ops-registry.git
