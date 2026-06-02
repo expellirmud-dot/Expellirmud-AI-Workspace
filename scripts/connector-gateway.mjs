@@ -92,7 +92,7 @@ const server = http.createServer(async (req, res) => {
             }
 
             let orchestratorReport = null;
-            const reportsDir = checkSafePath(path.join("reports", taskId, "reports"));
+            const reportsDir = checkSafePath(path.join("ai-ops-registry", "reports", taskId, "reports"));
             if (fs.existsSync(reportsDir)) {
                 const files = fs.readdirSync(reportsDir).sort().reverse();
                 const reportFile = files.find(f => f.startsWith('orchestrator-report') && f.endsWith('.json'));
